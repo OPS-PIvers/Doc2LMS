@@ -1,0 +1,23 @@
+# Quiz Converter
+A Google Docs add‑on to export quizzes into IMSCC, QTI, Moodle, and Blackboard packages.
+
+## Installation
+1. Clone the repo.
+2. Deploy as an Editor Add‑on in Apps Script.
+3. Grant necessary Drive and Docs scopes.
+
+## Usage
+1. Open any Google Doc containing quiz content.
+2. Run **Quiz Tools → Open Quiz Converter**.
+3. Select format and options, then click **Convert**.
+4. Download the generated ZIP from the created Drive folder.
+
+## Configuration
+- `applyQuickFixes`: boolean to auto‑clean formatting before export.
+
+## Troubleshooting
+- **Error dialogs** appear in‑UI with guidance.
+- Check **View → Logs** for details.
+
+## Development
+Use manual testing scenarios in Section 7. Ensure JSDoc coverage.
