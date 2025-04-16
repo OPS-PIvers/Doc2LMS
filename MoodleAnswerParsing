@@ -1,0 +1,6 @@
+/**
+ * MoodleAnswerParsing.gs – Moodle‑specific answer parsing.
+ */
+function MoodleAnswerParsing_parseAnswers() {
+  return parseAnswerKey();
+}
