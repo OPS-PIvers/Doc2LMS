@@ -1,0 +1,27 @@
+/**
+ * Utilities.gs – Helper functions.
+ */
+function standardizeBlankMarkers(text) {
+  if (!text) return "";
+  return text.replace(/_{3,}/g, "___")
+             .replace(/\[\s*blank\s*\]/gi, "___")
+             .replace(/\[\s*\]/g, "___");
+}
+
+function shuffleAnswerArray(array) {
+  var copy = array.slice();
+  for (var i = copy.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function sanitizeHtml(unsafe) {
+  if (!unsafe) return "";
+  return unsafe.replace(/&/g, "&amp;")
+               .replace(/</g, "&lt;")
+               .replace(/>/g, "&gt;")
+               .replace(/"/g, "&quot;")
+               .replace(/'/g, "&apos;");
+}
