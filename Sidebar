@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      /* General Styles */
+      body { font-family: Arial, sans-serif; margin: 0; padding: 10px; font-size: 14px; color: #333; }
+      .section { margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 4px; border: 1px solid #e9ecef; }
+      h3 { margin-top: 0; margin-bottom: 15px; color: #1a73e8; font-size: 16px; }
+      .instructions { font-size: 13px; color: #5f6368; line-height: 1.5; margin-bottom: 15px; }
+      .button { font-size: 14px; display: inline-block; border: none; cursor: pointer; background: radial-gradient(100% 100% at 100% 0%, #5494F5 0%, #1a73e8 100%); padding: 0 2em; border-radius: 0.3em; color: #fff; height: 2.8em; text-align: center; width: 100%; box-sizing: border-box; }
+      .button:hover { transform: translateY(-0.1em); }
+      .button:disabled { background: #ccc; cursor: not-allowed; }
+      .button.secondary { background: radial-gradient(100% 100% at 100% 0%, #4CC364 0%, #34a853 100%); }
+      #status { margin: 10px 0; padding: 12px; border-radius: 4px; display: none; }
+      .success { background-color: #e6f4ea; color: #137333; border: 1px solid #137333; }
+      .error { background-color: #fce8e6; color: #c5221f; border: 1px solid #c5221f; }
+      .tabs { display: flex; margin-bottom: 15px; border-bottom: 1px solid #dadce0; }
+      .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; color: #5f6368; font-size: 14px; }
+      .tab.active { color: #1a73e8; border-bottom: 2px solid #1a73e8; }
+      .loader { display: none; justify-content: center; align-items: center; margin: 20px 0; }
+      .loader .circle { width: 20px; height: 20px; border: 2px solid #1a73e8; border-radius: 50%; margin: 0 10px; animation: circle-keys 2s ease-in-out infinite; }
+      @keyframes circle-keys { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.5); opacity: 0.5; } 100% { transform: scale(1); opacity: 1; } }
+    </style>
+  </head>
+  <body>
+    <script>
+      window.onerror = function(msg, url, line, col, error) {
+        console.error('Global error:', { message: msg, url: url, line: line, column: col, error: error });
+        return false;
+      };
+      function showTab(tabName) {
+        document.querySelectorAll('.tab').forEach(function(tab) { tab.classList.remove('active'); });
+        document.querySelector('.tab[onclick="showTab(\'' + tabName + '\')"]').classList.add('active');
+        document.querySelectorAll('.tab-content').forEach(function(content) { content.style.display = 'none'; });
+        document.getElementById(tabName + 'Tab').style.display = 'block';
+      }
+      function startConversion() {
+        var btn = document.getElementById('convertButton');
+        btn.disabled = true;
+        var format = document.getElementById('exportFormat').value;
+        document.getElementById('loadingAnimation').style.display = 'flex';
+        document.getElementById('status').style.display = 'none';
+        document.getElementById('results').style.display = 'none';
+        google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFailure)
+          .startConversion({ exportFormat: format, applyQuickFixes: false });
+      }
+      function onSuccess(result) {
+        document.getElementById('convertButton').disabled = false;
+        document.getElementById('loadingAnimation').style.display = 'none';
+        if (result.success) {
+          showStatus('Conversion completed successfully!', 'success');
+          document.getElementById('exportFolderLink').href = result.exportFolderUrl;
+          document.getElementById('results').style.display = 'block';
+        } else {
+          showStatus('Error: ' + result.message, 'error');
+        }
+      }
+      function onFailure(error) {
+        document.getElementById('convertButton').disabled = false;
+        document.getElementById('loadingAnimation').style.display = 'none';
+        showStatus('Error: ' + error.message, 'error');
+      }
+      function showStatus(message, type) {
+        var s = document.getElementById('status');
+        s.style.display = 'block';
+        s.className = type;
+        s.innerHTML = message;
+      }
+      function downloadFile() {
+        showStatus('Preparing download...', 'progress');
+        var btn = document.getElementById('downloadButton');
+        btn.disabled = true;
+        google.script.run.withSuccessHandler(function(fileData) {
+          try {
+            var byteChars = atob(fileData.data);
+            var byteNums = new Array(byteChars.length);
+            for (var i = 0; i < byteChars.length; i++) {
+              byteNums[i] = byteChars.charCodeAt(i);
+            }
+            var blob = new Blob([new Uint8Array(byteNums)], { type: fileData.mimeType });
+            var url = window.URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = fileData.filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+            btn.disabled = false;
+            showStatus('Download started!', 'success');
+          } catch (e) {
+            showStatus('Error processing file: ' + e.message, 'error');
+            btn.disabled = false;
+          }
+        }).withFailureHandler(function(error) {
+          btn.disabled = false;
+          showStatus('Error downloading file: ' + error, 'error');
+        }).getDirectDownloadUrl();
+      }
+    </script>
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('convert')">Convert</button>
+      <button class="tab" onclick="showTab('help')">Help</button>
+    </div>
+    <div id="convertTab" class="tab-content">
+      <div class="section">
+        <h3>Quiz Converter</h3>
+        <div class="instructions">
+          Select an export format and click "Convert Document". Supported formats include IMSCC, QTI 2.1/2.2, Blackboard, and Moodle.
+        </div>
+        <div style="margin-bottom: 15px;">
+          <label for="exportFormat">Export Format:</label>
+          <select id="exportFormat">
+            <option value="IMSCC">IMSCC</option>
+            <option value="QTI">QTI 2.1/2.2</option>
+            <option value="Blackboard">Blackboard</option>
+            <option value="Moodle">Moodle</option>
+          </select>
+        </div>
+        <button id="convertButton" class="button" onclick="startConversion()">Convert Document</button>
+        <div class="loader" id="loadingAnimation">
+          <div class="circle"></div>
+          <div class="circle"></div>
+          <div class="circle"></div>
+          <div class="circle"></div>
+        </div>
+        <div id="status"></div>
+        <div id="results" style="display: none;">
+          <div class="download-section">
+            <button id="downloadButton" class="button secondary" onclick="downloadFile()">Download Quiz File</button>
+          </div>
+          <div class="additional-links">
+            <a id="exportFolderLink" class="result-link" target="_blank"><i>📁</i> Open Export Folder</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="helpTab" class="tab-content" style="display: none;">
+      <div class="section">
+        <h3>Document Format Requirements</h3>
+        <div class="help-content">
+          <p>Each question must be numbered and its answer options clearly labeled. Supported question types include:</p>
+          <ul>
+            <li>Multiple Choice / True-False</li>
+            <li>Fill in the Blank</li>
+            <li>Short Answer / Essay</li>
+            <li>Matching</li>
+            <li>Numeric</li>
+            <li>Ordering</li>
+          </ul>
+        </div>
+      </div>
+      <div class="section">
+        <h3>Instructions</h3>
+        <div class="help-content">
+          <ol>
+            <li>Format your document so that each question begins with a number followed by a period (e.g., “1.”) and options are lettered.</li>
+            <li>Include an “Answer Key” section at the end with answers for each question.</li>
+            <li>Select the export format.</li>
+            <li>Click "Convert Document".</li>
+            <li>When conversion is complete, click "Download Quiz File".</li>
+            <li>Import the file into your LMS.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
