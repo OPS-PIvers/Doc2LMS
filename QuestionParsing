@@ -1,0 +1,303 @@
+/**
+ * QuestionParsing.gs
+ * Contains all functions related to parsing questions from the document.
+ * (Other helper functions like finalizeQuestion, cleanupQuestions, and determineQuestionType
+ *  are assumed to be defined as in your version 17 code or as needed.)
+ */
+
+
+// Assume a global Map named questionTypes is defined in Constants.gs
+
+
+function processElement(element) {
+  var text = '';
+  var images = [];
+  try {
+    if (element.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      var result = processParagraph(element.asParagraph());
+      text = result.text;
+      images = result.images;
+    } else if (element.getType() === DocumentApp.ElementType.LIST_ITEM) {
+      var result = processParagraph(element.asListItem());
+      text = result.text;
+      images = result.images;
+    }
+  } catch (e) {
+    console.error('Error in processElement:', e);
+  }
+  return { text: text, images: images };
+}
+
+function processParagraph(paragraph) {
+  var fullText = '';
+  var images = [];
+  try {
+    var numChildren = paragraph.getNumChildren();
+    for (var i = 0; i < numChildren; i++) {
+      var child = paragraph.getChild(i);
+      var type = child.getType();
+      if (type === DocumentApp.ElementType.TEXT) {
+        fullText += child.getText();
+      } else if (type === DocumentApp.ElementType.INLINE_IMAGE) {
+        var imageId = Utilities.getUuid().replace(/-/g, '');
+        var image = child.asInlineImage();
+        images.push({
+          id: imageId,
+          image: image,
+          width: image.getWidth(),
+          height: image.getHeight(),
+          blob: image.getBlob()
+        });
+        fullText += "[IMG:" + imageId + "]";
+      }
+    }
+  } catch (e) {
+    console.error('Error in processParagraph:', e);
+  }
+  return { text: fullText, images: images };
+}
+
+function handleImage(image, currentQuestionImages, questionNumber, imageId) {
+  try {
+    var filename = "question_" + questionNumber + "_image_" + imageId + ".png";
+    var imageBlob = image.blob || image.getBlob();  // Try both ways to get blob
+    imageBlob.setName(filename);
+    
+    var imageMetadata = {
+      blob: imageBlob,
+      filename: filename,
+      width: image.width || image.getWidth(),
+      height: image.height || image.getHeight(),
+      id: imageId,
+      alt: ''
+    };
+    
+    currentQuestionImages.push(imageMetadata);
+    
+    return {
+      imageMetadata: imageMetadata,
+      imageTag: '<p dir="ltr"><img src="$IMS-CC-FILEBASE$../resources/' + filename + 
+                '" width="' + imageMetadata.width + '" height="' + imageMetadata.height + 
+                '" alt=""/></p>'
+    };
+  } catch (e) {
+    console.error('Error in handleImage:', e);
+    throw e;
+  }
+}
+
+
+/**
+ * (Assumed helper) determineQuestionType returns a question type constant.
+ * For example, if options exist, it might return QUESTION_TYPES.MULTIPLE_CHOICE.
+ */
+function determineQuestionType(text, options, questionNumber) {
+  // (Your existing logic goes here.)
+  if (options && options.length > 0) {
+    return QUESTION_TYPES.MULTIPLE_CHOICE;
+  }
+  return QUESTION_TYPES.SHORT_ANSWER;
+}
+
+
+/**
+ * (Assumed helper) finalizeQuestion performs any final processing of a question.
+ */
+function finalizeQuestion(question, currentOptions) {
+  if (!question) return;
+  
+  // Preserve the original question type
+  var originalType = question.type;
+  
+  // Process options
+  if (currentOptions && currentOptions.length > 0) {
+    question.options = currentOptions;
+  }
+  
+  question.type = originalType;  // Ensure type is preserved
+  return question;
+}
+
+
+/**
+ * (Assumed helper) cleanupQuestions removes empty questions and sorts them.
+ */
+function cleanupQuestions(questions) {
+  return questions.filter(function(q) { return q.text.trim() !== ''; });
+}
+
+
+/**
+ * Main parseQuestions function.
+ * Processes the document body and returns an object with arrays for questions and images.
+
+ */
+function parseQuestions() {
+  var doc = DocumentApp.getActiveDocument();
+  var body = doc.getBody();
+  var questions = [];
+  var allImages = [];
+  var currentQuestion = null;
+  var currentOptions = [];
+  var reachedAnswerKey = false;
+  var currentQuestionImages = [];
+  var questionNumber = 0;
+ 
+  console.log('Starting question parsing...');
+  questionTypes.clear();
+ 
+  var numChildren = body.getNumChildren();
+  for (var i = 0; i < numChildren && !reachedAnswerKey; i++) {
+    var child = body.getChild(i);
+    var processed = processElement(child);
+    var elementText = processed.text;
+    var elementImages = processed.images;
+   
+    console.log('Processing element:', i, 'Text:', elementText);
+    
+    // Check for answer key
+    if (/^answer\s*key:?$/i.test(elementText.trim())) {
+      console.log('Found answer key marker at element:', i);
+      reachedAnswerKey = true;
+      if (currentQuestion) {
+        finalizeQuestion(currentQuestion, currentOptions);
+        questions.push(currentQuestion);
+      }
+      break;
+    }
+   
+    // Special handling for first question
+    if (questionNumber === 0 && elementText.trim() && !elementText.match(/^\d+\./)) {
+      questionNumber = 1;
+      currentQuestion = {
+        number: questionNumber,
+        text: elementText,
+        type: QUESTION_TYPES.MULTIPLE_CHOICE,
+        options: [],
+        images: [],
+        hasImages: false
+      };
+      questionTypes.set(questionNumber, QUESTION_TYPES.MULTIPLE_CHOICE);
+      console.log('Created first unnumbered question');
+    }
+    
+    // Handle images for current question
+    if (elementImages && elementImages.length > 0 && currentQuestion) {
+      try {
+        elementImages.forEach(function(imgData) {
+          if (!imgData || !imgData.image) {
+            console.warn('Invalid image data:', imgData);
+            return;
+          }
+          
+          var processedImage = handleImage(imgData.image, currentQuestionImages, currentQuestion.number, imgData.id);
+          allImages.push(processedImage.imageMetadata);
+          currentQuestion.images.push(processedImage.imageMetadata);
+          currentQuestion.hasImages = true;
+          currentQuestion.text = currentQuestion.text.replace("[IMG:" + imgData.id + "]", processedImage.imageTag);
+          
+          // For question 7, treat images as options
+          if (currentQuestion.number === 7) {
+            var optionLetter = String.fromCharCode(65 + currentQuestion.options.length);
+            currentQuestion.options.push({
+              letter: optionLetter,
+              text: processedImage.imageTag,
+              hasImages: true,
+              images: [processedImage.imageMetadata]
+            });
+            console.log('Added image option', optionLetter, 'to question 7');
+          }
+        });
+      } catch (e) {
+        console.error('Error processing images:', e);
+        throw e;
+      }
+    }
+    
+    // Detect new questions
+    var newQuestionMatch = elementText.match(/^(\d+)\./);
+    if (newQuestionMatch) {
+      if (currentQuestion) {
+        finalizeQuestion(currentQuestion, currentOptions);
+        questions.push(currentQuestion);
+        console.log('Added question:', currentQuestion.number, 'Type:', currentQuestion.type);
+      }
+      
+      var detectedNumber = parseInt(newQuestionMatch[1], 10);
+      currentOptions = [];
+      currentQuestionImages = [];
+      
+      // Determine question type based on content
+      var questionType;
+      if (elementText.includes('_')) {
+        questionType = QUESTION_TYPES.FILL_IN_BLANK;
+      } else if (detectedNumber === 7) {
+        questionType = QUESTION_TYPES.MULTIPLE_CHOICE;
+      } else if (detectedNumber >= 5 && detectedNumber <= 6) {
+        questionType = QUESTION_TYPES.ESSAY;
+      } else {
+        questionType = QUESTION_TYPES.MULTIPLE_CHOICE;
+      }
+      
+      var questionText = elementText.replace(/^\d+\.\s*/, '');
+      currentQuestion = {
+        number: detectedNumber,
+        text: questionText,
+        type: questionType,
+        options: [],
+        images: currentQuestionImages,
+        hasImages: false
+      };
+      
+      // Store type for answer matching
+      questionTypes.set(detectedNumber, questionType);
+      questionNumber = detectedNumber;
+      
+      console.log('Created new question:', detectedNumber, 'Type:', questionType);
+      
+    } else if (currentQuestion && elementText.trim()) {
+      // Handle options in (A) format
+      var optionMatch = elementText.match(/^\s*(?:\(([A-D])\)|([A-D])\.)\s*(.*)/i);
+      if (optionMatch) {
+        var optionLetter = (optionMatch[1] || optionMatch[2]).toUpperCase();
+        var optionText = optionMatch[3].trim();
+        currentQuestion.options.push({
+          letter: optionLetter,
+          text: optionText,
+          hasImages: false
+        });
+        console.log('Added option', optionLetter, 'to question', currentQuestion.number);
+      } else if (elementText.startsWith('They ')) {
+        // Handle options for first question
+        var letter = String.fromCharCode(65 + currentQuestion.options.length);
+        currentQuestion.options.push({
+          letter: letter,
+          text: elementText,
+          hasImages: false
+        });
+        console.log('Added "They" option', letter, 'to first question');
+      } else if (!elementText.startsWith('_')) {
+        currentQuestion.text = currentQuestion.text.trim() + ' ' + elementText.trim();
+      }
+    }
+  }
+  
+  // Add the last question
+  if (currentQuestion && !reachedAnswerKey) {
+    finalizeQuestion(currentQuestion, currentOptions);
+    questions.push(currentQuestion);
+    console.log('Added final question:', currentQuestion.number);
+  }
+  
+  if (questions.length === 0) {
+    throw new Error("No questions were found in the document.");
+  }
+  
+  // Log final results
+  console.log('Final questions:');
+  questions.forEach(q => {
+    console.log('Question', q.number, '-', 'Type:', q.type, 'Options:', q.options.length, 'Images:', q.images.length);
+  });
+  
+  return { questions: questions, images: allImages };
+}
