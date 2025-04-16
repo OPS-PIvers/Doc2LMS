@@ -1,0 +1,339 @@
+/**
+ * QTIExport.gs – Exports quiz as QTI v2.1/2.2.
+ * This module outputs a ZIP file containing an XML assessment, item files, and a manifest.
+ */
+function QTIExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
+  try {
+    var itemsFolder = projectFolder.createFolder("items");
+    var resourcesFolder = projectFolder.createFolder("resources");
+    var imageMap = new Map();
+    if (images && images.length > 0) {
+      var processed = {};
+      images.forEach(function(img) {
+        if (img.blob && !processed[img.filename]) {
+          var file = resourcesFolder.createFile(img.blob).setName(img.filename);
+          imageMap.set(img.filename, file.getId());
+          processed[img.filename] = true;
+        }
+      });
+    }
+    var assessmentXml = createQTIAssessment(quizTitle, questionsData.length);
+    var assessmentFile = projectFolder.createFile("assessment.xml", assessmentXml, "application/xml");
+    questionsData.forEach(function(q, idx) {
+      var itemXml = createQTIItem(q, idx + 1, imageMap);
+      var fname = "item_" + (idx + 1) + ".xml";
+      itemsFolder.createFile(fname, itemXml, "application/xml");
+    });
+    // NEW: Create QTI manifest by calling the new function.
+    var manifestContent = createQTIManifest(quizTitle, questionsData.length, imageMap);
+    var manifestFile = projectFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
+    var files = [
+      manifestFile.getBlob().setName("imsmanifest.xml"),
+      assessmentFile.getBlob().setName("assessment.xml")
+    ];
+    var itemFiles = itemsFolder.getFiles();
+    while (itemFiles.hasNext()) {
+      var f = itemFiles.next();
+      files.push(f.getBlob().setName("items/" + f.getName()));
+    }
+    if (resourcesFolder.getFiles().hasNext()) {
+      var resFiles = resourcesFolder.getFiles();
+      while (resFiles.hasNext()) {
+        var f = resFiles.next();
+        files.push(f.getBlob().setName("resources/" + f.getName()));
+      }
+    }
+    var zipBlob = Utilities.zip(files, quizTitle + ".zip");
+    var exportFile = projectFolder.createFile(zipBlob);
+    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
+    return { success: true, exportFileUrl: exportFile.getUrl(), exportFolderUrl: projectFolder.getUrl(), exportFileId: exportFile.getId() };
+  } catch (e) {
+    console.error("QTI export error: " + e);
+    throw new Error("Failed to create QTI export files: " + e.message);
+  }
+}
+
+
+function createQTIAssessment(title, itemCount) {
+  var assessmentId = "assessment_" + Utilities.getUuid().replace(/-/g, "");
+  var sanitized = title.replace(/[<>&'"]/g, "");
+  var refs = "";
+  for (var i = 1; i <= itemCount; i++) {
+    refs += "      <assessmentItemRef identifier=\"item" + i + "\" href=\"items/item_" + i + ".xml\"/>\n";
+  }
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+         '<assessmentTest xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1" ' +
+         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
+         'xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 ' +
+         'http://www.imsglobal.org/xsd/qti/qtiv2p1/imsqti_v2p1.xsd" ' +
+         'identifier="' + assessmentId + '" title="' + sanitized +
+         '" toolName="Doc to LMS" toolVersion="17">\n' +
+         '  <testPart identifier="testPart1" navigationMode="linear" submissionMode="individual">\n' +
+         '    <assessmentSection identifier="assessmentSection1" title="' + sanitized + '" visible="true">\n' +
+         refs +
+         '    </assessmentSection>\n' +
+         '  </testPart>\n' +
+         '</assessmentTest>';
+}
+
+
+function createQTIItem(question, index, imageMap) {
+  var itemId = "item" + index;
+  var responseId = "RESPONSE_" + index;
+  var itemXml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<assessmentItem xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1" ' +
+    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
+    'xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 ' +
+    'http://www.imsglobal.org/xsd/qti/qtiv2p1/imsqti_v2p1.xsd" ' +
+    'identifier="' + itemId + '" title="Question ' + index +
+    '" adaptive="false" toolName="Doc to LMS" toolVersion="17" timeDependent="false">\n' +
+    '  <responseDeclaration identifier="' + responseId + '" cardinality="single" baseType="' + getBaseType(question.type) + '">\n' +
+    createResponseDeclaration(question, responseId) +
+    '  </responseDeclaration>\n' +
+    '  <outcomeDeclaration identifier="SCORE" cardinality="single" baseType="float">\n' +
+    '    <defaultValue>\n' +
+    '      <value>0</value>\n' +
+    '    </defaultValue>\n' +
+    '  </outcomeDeclaration>\n' +
+    '  <itemBody>\n' +
+    createItemBody(question, responseId, imageMap) +
+    '  </itemBody>\n' +
+    '  <responseProcessing>\n' +
+    createResponseProcessing(question, responseId) +
+    '  </responseProcessing>\n' +
+    '</assessmentItem>';
+  return itemXml;
+}
+
+
+function getBaseType(qType) {
+  switch (qType) {
+    case QUESTION_TYPES.MULTIPLE_CHOICE:
+    case QUESTION_TYPES.TRUE_FALSE:
+      return "identifier";
+    case QUESTION_TYPES.FILL_IN_BLANK:
+    case QUESTION_TYPES.NUMERIC:
+      return "float";
+    case QUESTION_TYPES.SHORT_ANSWER:
+    case QUESTION_TYPES.ESSAY:
+      return "string";
+    case QUESTION_TYPES.MATCHING:
+    case QUESTION_TYPES.ORDERING:
+      return "directedPair";
+    default:
+      return "string";
+  }
+}
+
+
+function createResponseDeclaration(question, responseId) {
+  switch (question.type) {
+    case QUESTION_TYPES.MULTIPLE_CHOICE:
+    case QUESTION_TYPES.TRUE_FALSE:
+      return '    <correctResponse>\n' +
+             '      <value>choice_' + (question.correctAnswerIndex + 1) + '</value>\n' +
+             '    </correctResponse>\n';
+    case QUESTION_TYPES.FILL_IN_BLANK:
+    case QUESTION_TYPES.NUMERIC:
+      var vals = question.correctAnswers.map(function(ans) { return "      <value>" + sanitizeHtml(ans) + "</value>"; }).join("\n");
+      return "    <correctResponse>\n" + vals + "\n    </correctResponse>\n";
+    case QUESTION_TYPES.MATCHING:
+      var pairs = question.correctMatches.map(function(pair) {
+        return "      <value>" + sanitizeHtml(pair.left) + "=>" + sanitizeHtml(pair.right) + "</value>";
+      }).join("\n");
+      return "    <correctResponse>\n" + pairs + "\n    </correctResponse>\n";
+    case QUESTION_TYPES.ORDERING:
+      var order = question.correctOrder.map(function(item, idx) {
+        return "      <value>" + (idx + 1) + ":" + sanitizeHtml(item) + "</value>";
+      }).join("\n");
+      return "    <correctResponse>\n" + order + "\n    </correctResponse>\n";
+    case QUESTION_TYPES.SHORT_ANSWER:
+    case QUESTION_TYPES.ESSAY:
+      return "";
+    default:
+      return "";
+  }
+}
+
+
+function createItemBody(question, responseId, imageMap) {
+  var qText = question.questionText;
+  if (question.hasImages) qText = replaceImageTags(qText, imageMap);
+  var body = '<div class="question-content">' + qText + '</div>\n';
+  switch (question.type) {
+    case QUESTION_TYPES.MULTIPLE_CHOICE:
+    case QUESTION_TYPES.TRUE_FALSE:
+      body += createMultipleChoiceInteraction(question, responseId, imageMap);
+      break;
+    case QUESTION_TYPES.FILL_IN_BLANK:
+    case QUESTION_TYPES.NUMERIC:
+      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="20"/>\n';
+      break;
+    case QUESTION_TYPES.SHORT_ANSWER:
+      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="100"/>\n';
+      break;
+    case QUESTION_TYPES.ESSAY:
+      body += '    <extendedTextInteraction responseIdentifier="' + responseId + '" expectedLength="10000"/>\n';
+      break;
+    case QUESTION_TYPES.MATCHING:
+      body += createMatchingInteraction(question, responseId);
+      break;
+    case QUESTION_TYPES.ORDERING:
+      body += createOrderInteraction(question, responseId);
+      break;
+    default:
+      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="100"/>\n';
+  }
+  return body;
+}
+
+
+function createMultipleChoiceInteraction(question, responseId, imageMap) {
+  var optsXml = "";
+  question.options.forEach(function(opt, i) {
+    var optionId = "choice_" + (i + 1);
+    var optText = (typeof opt === "string") ? opt : opt.text;
+    if (typeof opt === "object" && opt.hasImages) {
+      optText = replaceImageTags(opt.text, imageMap);
+    }
+    optsXml += "          <simpleChoice identifier=\"" + optionId + "\">" + sanitizeHtml(optText) + "</simpleChoice>\n";
+  });
+  return '    <choiceInteraction responseIdentifier="' + responseId + '" shuffle="No" maxChoices="1">\n' +
+         optsXml +
+         '    </choiceInteraction>\n';
+}
+
+
+function createMatchingInteraction(question, responseId) {
+  var leftChoices = "";
+  var rightChoices = "";
+  question.options.forEach(function(pair, i) {
+    leftChoices += "          <simpleAssociableChoice identifier=\"L" + (i+1) + "\" fixed=\"No\">" + sanitizeHtml(pair.left) + "</simpleAssociableChoice>\n";
+    rightChoices += "          <simpleAssociableChoice identifier=\"R" + (i+1) + "\" fixed=\"No\">" + sanitizeHtml(pair.right) + "</simpleAssociableChoice>\n";
+  });
+  return '    <matchInteraction responseIdentifier="' + responseId + '" shuffle="Yes">\n' +
+         "          <simpleMatchSet>\n" + leftChoices + "          </simpleMatchSet>\n" +
+         "          <simpleMatchSet>\n" + rightChoices + "          </simpleMatchSet>\n" +
+         '    </matchInteraction>\n';
+}
+
+
+function createOrderInteraction(question, responseId) {
+  var choices = "";
+  question.options.forEach(function(choice, i) {
+    choices += "          <simpleChoice identifier=\"order_" + (i+1) + "\">" + sanitizeHtml(choice) + "</simpleChoice>\n";
+  });
+  return '    <orderInteraction responseIdentifier="' + responseId + '" shuffle="No">\n' +
+         choices +
+         '    </orderInteraction>\n';
+}
+
+
+function createResponseProcessing(question, responseId) {
+  switch (question.type) {
+    case QUESTION_TYPES.MULTIPLE_CHOICE:
+    case QUESTION_TYPES.TRUE_FALSE:
+      return '<responseCondition>\n' +
+             '  <responseIf>\n' +
+             '    <match>\n' +
+             '      <variable identifier="' + responseId + '"/>\n' +
+             '      <correct identifier="' + responseId + '"/>\n' +
+             '    </match>\n' +
+             '    <setOutcomeValue identifier="SCORE">\n' +
+             '      <baseValue baseType="float">1</baseValue>\n' +
+             '    </setOutcomeValue>\n' +
+             '  </responseIf>\n' +
+             '</responseCondition>';
+    case QUESTION_TYPES.FILL_IN_BLANK:
+    case QUESTION_TYPES.NUMERIC:
+      return '<responseCondition>\n' +
+             '  <responseIf>\n' +
+             '    <isNull>\n' +
+             '      <variable identifier="' + responseId + '"/>\n' +
+             '    </isNull>\n' +
+             '    <setOutcomeValue identifier="SCORE">\n' +
+             '      <baseValue baseType="float">0</baseValue>\n' +
+             '    </setOutcomeValue>\n' +
+             '  </responseIf>\n' +
+             '  <responseElseIf>\n' +
+             '    <match>\n' +
+             '      <variable identifier="' + responseId + '"/>\n' +
+             '      <correct identifier="' + responseId + '"/>\n' +
+             '    </match>\n' +
+             '    <setOutcomeValue identifier="SCORE">\n' +
+             '      <baseValue baseType="float">1</baseValue>\n' +
+             '    </setOutcomeValue>\n' +
+             '  </responseElseIf>\n' +
+             '</responseCondition>';
+    case QUESTION_TYPES.SHORT_ANSWER:
+    case QUESTION_TYPES.ESSAY:
+      return '<responseCondition>\n' +
+             '  <responseIf>\n' +
+             '    <not>\n' +
+             '      <isNull>\n' +
+             '        <variable identifier="' + responseId + '"/>\n' +
+             '      </isNull>\n' +
+             '    </not>\n' +
+             '    <setOutcomeValue identifier="SCORE">\n' +
+             '      <baseValue baseType="float">0</baseValue>\n' +
+             '    </setOutcomeValue>\n' +
+             '  </responseIf>\n' +
+             '</responseCondition>';
+    case QUESTION_TYPES.MATCHING:
+    case QUESTION_TYPES.ORDERING:
+      return "";
+    default:
+      return "";
+  }
+}
+
+
+function replaceImageTags(text, imageMap) {
+  if (!text) return "";
+  // For QTI export, we use a relative path pointing to the resources folder.
+  text = text.replace(/<img[^>]*src="[^"]*\/([^/"]+)"[^>]*>/g, function(match, filename) {
+    if (imageMap && imageMap.get(filename)) {
+      return '<img src="resources/' + filename + '" alt=""/>';
+    }
+    return match;
+  });
+  return text;
+}
+
+
+function sanitizeHtml(unsafe) {
+  if (!unsafe) return "";
+  return unsafe.replace(/&/g, "&amp;")
+               .replace(/</g, "&lt;")
+               .replace(/>/g, "&gt;")
+               .replace(/"/g, "&quot;")
+               .replace(/'/g, "&apos;");
+}
+
+
+/**
+ * NEW: Creates a QTI manifest XML file.
+ * @param {string} quizTitle - The title of the quiz.
+ * @param {number} itemCount - The number of items.
+ * @param {Map} imageMap - A map of image filenames to file IDs.
+ * @return {string} The manifest XML content.
+ */
+function createQTIManifest(quizTitle, itemCount, imageMap) {
+  var manifest = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  manifest += '<manifest identifier="MANIFEST-' + Utilities.getUuid() + '">\n';
+  manifest += '  <metadata>\n';
+  manifest += '    <schema>IMS Common Cartridge</schema>\n';
+  manifest += '    <schemaversion>1.2.0</schemaversion>\n';
+  manifest += '  </metadata>\n';
+  manifest += '  <organizations/>\n';
+  manifest += '  <resources>\n';
+  if (imageMap) {
+    imageMap.forEach(function(fileId, filename) {
+      manifest += '    <resource identifier="' + filename + '" type="webcontent" href="resources/' + filename + '"/>\n';
+    });
+  }
+  manifest += '  </resources>\n';
+  manifest += '</manifest>';
+  return manifest;
+}
