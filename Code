@@ -1,0 +1,121 @@
+/**
+ * Code.gs – Main entry point.
+ */
+function onOpen() {
+  DocumentApp.getUi()
+    .createMenu('Quiz Tools')
+    .addItem('Open Quiz Converter', 'showSidebar')
+    .addItem('Apply Quick Fixes', 'showQuickFixesDialog')
+    .addToUi();
+}
+
+function showSidebar() {
+  try {
+    var template = HtmlService.createTemplateFromFile('Sidebar');
+    var evaluated = template.evaluate().setTitle('Quiz Converter').setWidth(300);
+    DocumentApp.getUi().showSidebar(evaluated);
+    return 'Sidebar created';
+  } catch (e) {
+    console.error('Error showing sidebar: ' + e);
+    throw e;
+  }
+}
+
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+/**
+ * startConversion – Main conversion function.
+ * Options:
+ *   exportFormat: one of "IMSCC" | "QTI" | "Blackboard" | "Moodle" (default IMSCC)
+ *   applyQuickFixes: boolean (default false)
+ */
+function startConversion(options) {
+  options = options || {};
+  var exportFormat = options.exportFormat || "IMSCC";
+  var doc = DocumentApp.getActiveDocument();
+  var docName = doc.getName();
+  
+  // Optionally apply quick fixes.
+  if (options.applyQuickFixes && applyQuickFixes()) {
+    Utilities.sleep(1000);
+  }
+  
+  var mainFolder = getOrCreateMainFolder();
+  var timestamp = formatTimestamp(new Date());
+  var projectFolder = mainFolder.createFolder(docName + " - " + timestamp);
+  
+  // Use export-specific parsing routines.
+  var questions, images, answers;
+  if (exportFormat === "QTI") {
+    questions = QTIQuestionParsing_parseQuestions();
+    images = QTIQuestionParsing_getImages();
+    answers = QTIAnswerParsing_parseAnswers();
+  } else if (exportFormat === "Blackboard") {
+    questions = BlackboardQuestionParsing_parseQuestions();
+    images = BlackboardQuestionParsing_getImages();
+    answers = BlackboardAnswerParsing_parseAnswers();
+  } else if (exportFormat === "Moodle") {
+    questions = MoodleQuestionParsing_parseQuestions();
+    images = MoodleQuestionParsing_getImages();
+    answers = MoodleAnswerParsing_parseAnswers();
+  } else { // default IMSCC
+    questions = IMSCCQuestionParsing_parseQuestions();
+    images = IMSCCQuestionParsing_getImages();
+    answers = IMSCCAnswerParsing_parseAnswers();
+  }
+  
+  var combinedData = combineQuestionsAndAnswers(questions, answers);
+  
+  // Call the export module for the selected format.
+  var exportResult;
+  if (exportFormat === "QTI") {
+    exportResult = QTIExport_createExportFiles(combinedData, images, projectFolder, docName);
+  } else if (exportFormat === "Blackboard") {
+    exportResult = BlackboardExport_createExportFiles(combinedData, images, projectFolder, docName);
+  } else if (exportFormat === "Moodle") {
+    exportResult = MoodleExport_createExportFiles(combinedData, images, projectFolder, docName);
+  } else {
+    exportResult = IMSCCExport_createExportFiles(combinedData, images, projectFolder, docName);
+  }
+  
+  return {
+    success: true,
+    exportFolderUrl: projectFolder.getUrl(),
+    fileUrl: exportResult.fileUrl || exportResult.imsccFileUrl || exportResult.exportFileUrl,
+    message: "Conversion completed successfully!"
+  };
+}
+
+function getOrCreateMainFolder() {
+  var folderName = "Doc to LMS";
+  var folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) return folders.next();
+  return DriveApp.createFolder(folderName);
+}
+
+function formatTimestamp(date) {
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var day = date.getDate();
+  var month = months[date.getMonth()];
+  var year = date.getFullYear();
+  var hours = String(date.getHours()).padStart(2, '0');
+  var minutes = String(date.getMinutes()).padStart(2, '0');
+  return month + " " + day + " " + year + " " + hours + ":" + minutes;
+}
+
+function getDirectDownloadUrl() {
+  try {
+    var fileId = PropertiesService.getScriptProperties().getProperty("lastExportFileId");
+    var fileName = PropertiesService.getScriptProperties().getProperty("lastExportFileName");
+    if (!fileId) throw new Error("No export file found.");
+    var file = DriveApp.getFileById(fileId);
+    var blob = file.getBlob();
+    var base64 = Utilities.base64Encode(blob.getBytes());
+    return { data: base64, mimeType: blob.getContentType(), filename: fileName || file.getName() };
+  } catch (e) {
+    console.error(e);
+    throw new Error("Download preparation failed: " + e.message);
+  }
+}
