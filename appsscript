@@ -1,0 +1,28 @@
+{
+  "timeZone": "America/Chicago",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/documents.currentonly",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/script.container.ui"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Doc to LMS",
+      "logoUrl": "https://drive.google.com/uc?export=view&id=1Akl1exmRAjAr4kS4hHVw9T3v45XpkLFC",
+      "useLocaleFromApp": true,
+      "homepageTrigger": {
+        "runFunction": "onOpen",
+        "enabled": true
+      }
+    },
+    "docs": {
+      "homepageTrigger": {
+        "runFunction": "onOpen",
+        "enabled": true
+      }
+    }
+  }
+}
