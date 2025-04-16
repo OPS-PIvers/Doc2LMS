@@ -1,0 +1,14 @@
+/**
+ * Constants.gs – Global constants.
+ */
+const QUESTION_TYPES = {
+  MULTIPLE_CHOICE: "multiple_choice",
+  TRUE_FALSE: "true_false",
+  FILL_IN_BLANK: "fill_in_blank",
+  SHORT_ANSWER: "short_answer",
+  ESSAY: "essay",
+  MATCHING: "matching",
+  NUMERIC: "numeric",
+  ORDERING: "ordering"
+};
+const questionTypes = new Map();  // Used to record a question’s type by its number.
