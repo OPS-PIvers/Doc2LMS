@@ -1,0 +1,162 @@
+/**
+ * BlackboardExport.gs – Exports quiz for Blackboard.
+ * This module produces an XML package similar to IMSCC but with Blackboard‐specific metadata.
+ */
+function BlackboardExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
+  try {
+    var bbFolder = projectFolder.createFolder("BlackboardExport");
+    var resourcesFolder = bbFolder.createFolder("resources");
+    // Process images and create an imageMap (filename => file ID)
+    var imageMap = new Map();
+    if (images && images.length > 0) {
+      var processed = {};
+      images.forEach(function(img) {
+        if (img.blob && !processed[img.filename]) {
+          var file = resourcesFolder.createFile(img.blob).setName(img.filename);
+          imageMap.set(img.filename, file.getId());
+          processed[img.filename] = true;
+        }
+      });
+    }
+    // Pass the imageMap into createBlackboardXML so that image references can be updated.
+    var bbXml = createBlackboardXML(quizTitle, questionsData, imageMap);
+    var manifestContent = createBlackboardManifest(quizTitle);
+    var xmlFile = bbFolder.createFile("blackboard.xml", bbXml, "application/xml");
+    var manifestFile = bbFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
+    var files = [
+      xmlFile.getBlob().setName("blackboard.xml"),
+      manifestFile.getBlob().setName("imsmanifest.xml")
+    ];
+    if (resourcesFolder.getFiles().hasNext()) {
+      var resFiles = resourcesFolder.getFiles();
+      while (resFiles.hasNext()) {
+        var file = resFiles.next();
+        files.push(file.getBlob().setName("resources/" + file.getName()));
+      }
+    }
+    var zipBlob = Utilities.zip(files, quizTitle + "_Blackboard.zip");
+    var exportFile = bbFolder.createFile(zipBlob);
+    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
+    return { success: true, fileUrl: exportFile.getUrl(), exportFolderUrl: bbFolder.getUrl(), exportFileId: exportFile.getId() };
+  } catch (e) {
+    console.error("Blackboard export error: " + e);
+    throw new Error("Failed to create Blackboard export files: " + e.message);
+  }
+}
+
+
+function createBlackboardXML(quizTitle, questionsData, imageMap) {
+  var assessmentId = "bb_" + Utilities.getUuid().replace(/-/g, "");
+  var sanitized = quizTitle.replace(/[<>&'"]/g, "");
+  var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+            '<questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2" \n' +
+            '   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" \n' +
+            '   xsi:schemaLocation="http://www.imsglobal.org/xsd/ims_qtiasiv1p2 http://www.imsglobal.org/profile/blackboard/blackboard_qti.xsd">\n' +
+            '  <assessment ident="' + assessmentId + '" title="' + sanitized + '">\n' +
+            '    <qtimetadata>\n' +
+            '      <qtimetadatafield>\n' +
+            '        <fieldlabel>blackboard_profile</fieldlabel>\n' +
+            '        <fieldentry>bb.export.v1</fieldentry>\n' +
+            '      </qtimetadatafield>\n' +
+            '      <qtimetadatafield>\n' +
+            '        <fieldlabel>qmd_assessmenttype</fieldlabel>\n' +
+            '        <fieldentry>Examination</fieldentry>\n' +
+            '      </qtimetadatafield>\n' +
+            '      <qtimetadatafield>\n' +
+            '        <fieldlabel>qmd_scoretype</fieldlabel>\n' +
+            '        <fieldentry>Percentage</fieldentry>\n' +
+            '      </qtimetadatafield>\n' +
+            '    </qtimetadata>\n' +
+            '    <section ident="root_section">\n';
+  questionsData.forEach(function(q, idx) {
+    var num = idx + 1;
+    // Call createMultipleChoiceXML with the imageMap.
+    xml += createMultipleChoiceXML(q, num, imageMap);
+  });
+  xml += "    </section>\n  </assessment>\n</questestinterop>";
+  return xml;
+}
+
+
+function createBlackboardManifest(quizTitle) {
+  var sanitized = quizTitle.replace(/[<>&'"]/g, "");
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+         '<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p2/imscp_v1p1" \n' +
+         '   xmlns:lom="http://ltsc.ieee.org/xsd/imsccv1p2/LOM/resource" \n' +
+         '   xmlns:lomimscc="http://ltsc.ieee.org/xsd/imsccv1p2/LOM/manifest" \n' +
+         '   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" \n' +
+         '   identifier="bb_manifest" \n' +
+         '   xsi:schemaLocation="http://www.imsglobal.org/xsd/imsccv1p2/imscp_v1p1 \n' +
+         '   http://www.imsglobal.org/profile/blackboard/blackboard_manifest.xsd">\n' +
+         "  <metadata>\n" +
+         "    <schema>Blackboard Common Cartridge</schema>\n" +
+         "    <schemaversion>1.2.0</schemaversion>\n" +
+         "    <lomimscc:lom>\n" +
+         "      <lomimscc:general>\n" +
+         "        <lomimscc:title>\n" +
+         "          <lomimscc:string>" + sanitized + "</lomimscc:string>\n" +
+         "        </lomimscc:title>\n" +
+         "      </lomimscc:general>\n" +
+         "    </lomimscc:lom>\n" +
+         "  </metadata>\n" +
+         "  <organizations>\n" +
+         '    <organization identifier="bb_org" structure="rooted-hierarchy">\n' +
+         "      <item identifier=\"bb_root\">\n" +
+         '        <item identifier="bb_item1" identifierref="bb_res0001">\n' +
+         "          <title>" + sanitized + "</title>\n" +
+         "        </item>\n" +
+         "      </item>\n" +
+         "    </organization>\n" +
+         "  </organizations>\n" +
+         "  <resources>\n" +
+         '    <resource identifier="bb_res0001" type="imsqti_xmlv1p2/blackboard_xmlv1" href="blackboard.xml">\n' +
+         "      <file href=\"blackboard.xml\"/>\n" +
+         "    </resource>\n" +
+         "  </resources>\n" +
+         "</manifest>";
+}
+
+
+// Helper: createMultipleChoiceXML now accepts an imageMap.
+function createMultipleChoiceXML(question, questionNumber, imageMap) {
+  var qText = question.questionText;
+  if (question.hasImages && imageMap) {
+    qText = replaceImageTags(qText, imageMap);
+  }
+  var optsXml = "";
+  question.options.forEach(function(opt, i) {
+    var optionId = "choice_" + (i + 1);
+    var optText = (typeof opt === "string") ? opt : opt.text;
+    if (typeof opt === "object" && opt.hasImages && imageMap) {
+      optText = replaceImageTags(opt.text, imageMap);
+    }
+    optsXml += "          <simpleChoice identifier=\"" + optionId + "\">" + sanitizeHtml(optText) + "</simpleChoice>\n";
+  });
+  return '    <choiceInteraction responseIdentifier="RESPONSE_' + questionNumber + '" shuffle="No" maxChoices="1">\n' +
+         optsXml +
+         '    </choiceInteraction>\n';
+}
+
+
+function replaceImageTags(text, imageMap) {
+  if (!text) return "";
+  // For Blackboard export, use a relative path pointing to the resources folder.
+  text = text.replace(/<img[^>]*src="[^"]*\/([^/"]+)"[^>]*>/g, function(match, filename) {
+    if (imageMap && imageMap.get(filename)) {
+      return '<img src="resources/' + filename + '" alt=""/>';
+    }
+    return match;
+  });
+  return text;
+}
+
+
+function sanitizeHtml(text) {
+  if (!text) return "";
+  return text.replace(/&/g, "&amp;")
+             .replace(/</g, "&lt;")
+             .replace(/>/g, "&gt;")
+             .replace(/"/g, "&quot;")
+             .replace(/'/g, "&apos;");
+}
