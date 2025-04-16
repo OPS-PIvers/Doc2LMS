@@ -1,0 +1,325 @@
+/**
+ * AnswerKeyParsing.gs
+ *
+ * Contains all functions related to parsing and processing answer keys.
+ */
+
+
+/**
+ * Main function for parsing answer key
+ */
+function parseAnswerKey() {
+  var doc = DocumentApp.getActiveDocument();
+  var body = doc.getBody();
+  var answers = {};
+  var foundKey = false;
+  
+  console.log('Starting answer key parsing...');
+  
+  var numChildren = body.getNumChildren();
+  for (var i = 0; i < numChildren; i++) {
+    var child = body.getChild(i);
+    var text = child.getText().trim();
+    
+    // Debug log
+    console.log('Examining line:', text);
+    
+    if (!foundKey && isAnswerKeyHeader(text)) {
+      console.log('Found answer key header');
+      foundKey = true;
+      continue;
+    }
+    
+    if (foundKey && text) {
+      // Look for lines that start with a number followed by a period or dot
+      var match = text.match(/^(\d+)[.)]\s*(.+)/);
+      if (match) {
+        var num = parseInt(match[1]);
+        var answerText = match[2].trim();
+        console.log('Found answer for question', num, ':', answerText);
+        
+        // Determine the question type from the stored types
+        var qType = questionTypes.get(num) || QUESTION_TYPES.MULTIPLE_CHOICE;
+        answers[num] = {
+          type: qType,
+          value: answerText.toUpperCase()
+        };
+      }
+    }
+  }
+  
+  console.log('Parsed answers:', answers);
+  return answers;
+}
+
+
+/**
+ * Checks if text is an answer key header
+ */
+function isAnswerKeyHeader(text) {
+  const headerPatterns = [
+    /^answer\s*key:?$/i,
+    /^answers:?$/i,
+    /^key:?$/i,
+    /^answer:?$/i
+  ];
+  return headerPatterns.some(pattern => pattern.test(text.trim()));
+}
+
+
+/**
+ * Parses a single answer line (like "1. A" or "2. Jupiter, jupiter")
+ */
+/**
+ * Parses a single answer line (e.g., "1. A", "2. Jupiter", "3. correct, valid").
+ */
+/**
+ * Parses a single answer line from the answer key
+ * @param {string} text - The text of the answer line
+ * @param {number|null} nativeNumber - Question number from native list numbering
+ * @returns {Object|null} Parsed answer data or null if invalid
+ */
+function parseAnswerLine(text, nativeNumber) {
+  if (!text) {
+    return null;
+  }
+
+
+  // Clean the text before checking
+  const cleanedText = cleanAnswerKeyText(text);
+ 
+  // Skip if it's an answer key header
+  if (isAnswerKeyHeader(cleanedText)) {
+    console.log('Skipping answer key header:', cleanedText);
+    return null;
+  }
+
+
+  // If we have a native number from the list, try to extract just the answer
+  if (nativeNumber !== null) {
+    // Check if it's just a raw answer (like "influence")
+    if (cleanedText && questionTypes.get(nativeNumber) === QUESTION_TYPES.FILL_IN_BLANK) {
+      console.log(`Found raw fill-in-blank answer for question ${nativeNumber}: ${cleanedText}`);
+      return {
+        number: nativeNumber,
+        answer: {
+          type: QUESTION_TYPES.FILL_IN_BLANK,
+          value: [cleanedText.trim()] // Wrap in array since value expects array of possible answers
+        }
+      };
+    }
+
+
+    // Look for just the answer part without requiring a number
+    const answerOnlyMatch = cleanedText.match(/^[.).]\s*([A-Da-d])[.)]?\s*$/) ||
+                           cleanedText.match(/^([A-Da-d])[.)]?\s*$/);
+    if (answerOnlyMatch && questionTypes.get(nativeNumber) === QUESTION_TYPES.MULTIPLE_CHOICE) {
+      console.log(`Found answer-only format for question ${nativeNumber}: ${answerOnlyMatch[1]}`);
+      return {
+        number: nativeNumber,
+        answer: {
+          type: QUESTION_TYPES.MULTIPLE_CHOICE,
+          value: answerOnlyMatch[1].toUpperCase()
+        }
+      };
+    }
+  }
+
+
+  // Simple format: "1. A" or "1. A)"
+  const simpleMatch = cleanedText.match(/^(\d+)[.).]\s*([A-Da-d])[.)]?\s*$/);
+  if (simpleMatch) {
+    const num = parseInt(simpleMatch[1]);
+    if (questionTypes.get(num) === QUESTION_TYPES.MULTIPLE_CHOICE) {
+      console.log(`Found simple format answer: Question ${simpleMatch[1]}, Answer ${simpleMatch[2]}`);
+      return {
+        number: num,
+        answer: {
+          type: QUESTION_TYPES.MULTIPLE_CHOICE,
+          value: simpleMatch[2].toUpperCase()
+        }
+      };
+    }
+  }
+
+
+  // More formats as backup for multiple choice
+  const formats = {
+    multipleChoice: [
+      /^(\d+)\s*[-.).]\s*([A-Da-d])\s*$/i,
+      /^(\d+)\s*[-.).]\s*\(?([A-Da-d])\)?\s*$/i,
+      /^(\d+)\s*:\s*([A-Da-d])\s*$/i,
+      /^(\d+)\s+([A-Da-d])\s*$/i
+    ]
+  };
+
+
+  // Try multiple choice formats
+  for (const format of formats.multipleChoice) {
+    const match = cleanedText.match(format);
+    if (match) {
+      const num = parseInt(match[1]);
+      if (questionTypes.get(num) === QUESTION_TYPES.MULTIPLE_CHOICE) {
+        console.log(`Found MC answer via format: Question ${match[1]}, Answer ${match[2]}`);
+        return {
+          number: num,
+          answer: {
+            type: QUESTION_TYPES.MULTIPLE_CHOICE,
+            value: match[2].toUpperCase()
+          }
+        };
+      }
+    }
+  }
+
+
+  // Check for non-MC answers (fill in blank or short answer)
+  const generalMatch = cleanedText.match(/^(\d+)[.).]\s*(.+)$/);
+  if (generalMatch) {
+    const num = parseInt(generalMatch[1]);
+    const answerText = generalMatch[2].trim();
+    const type = questionTypes.get(num);
+
+
+    if (type === QUESTION_TYPES.FILL_IN_BLANK) {
+      console.log(`Found fill-in-blank answer: Question ${num}, Answer(s): ${answerText}`);
+      return {
+        number: num,
+        answer: {
+          type: QUESTION_TYPES.FILL_IN_BLANK,
+          value: answerText.split(',').map(ans => ans.trim())
+        }
+      };
+    } else if (type === QUESTION_TYPES.SHORT_ANSWER) {
+      console.log(`Found short answer: Question ${num}, Answer: ${answerText}`);
+      return {
+        number: num,
+        answer: {
+          type: QUESTION_TYPES.SHORT_ANSWER,
+          value: answerText
+        }
+      };
+    }
+  }
+
+
+  // If we get here, log that we couldn't parse this line
+  console.warn('Could not parse answer line:', text);
+  return null;
+}
+
+
+/**
+ * Cleans up answer key text (removing "Answer:", etc.)
+ */
+function cleanAnswerKeyText(text) {
+  return text
+    .trim()
+    .replace(/^[aA]nswer:?\s*/i, '')
+    .replace(/^[kK]ey:?\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, ''); // Remove zero-width spaces
+}
+
+
+function parseNativeNumber(listItem, body, childIndex) {
+  const listId = listItem.getListId();
+  if (listId) {
+    const listItems = body.getListItems();
+    let count = 0;
+    for (const item of listItems) {
+      if (item.getListId() === listId && body.getChildIndex(item) <= childIndex) {
+        count++;
+      }
+    }
+    return count;
+  }
+  return null;
+}
+
+
+/**
+ * ------------------------------------------------------------------------
+ * COMBINE QUESTIONS & ANSWERS
+ * ------------------------------------------------------------------------
+ * Matches each question object with its corresponding answer from the
+ * parsed answers object (keyed by question number).
+ */
+function combineQuestionsAndAnswers(questions, answers) {
+  // Log input state
+  console.log('Combining questions and answers:');
+  console.log('Questions:', questions.map(q => ({ num: q.number, type: q.type })));
+  console.log('Answers:', Object.keys(answers).map(key => ({ num: key, type: answers[key].type })));
+  
+  return questions.map(function(q) {
+    console.log('Processing question:', q.number, 'Type:', q.type);
+    
+    var base = {
+      questionText: q.text,
+      type: q.type,
+      hasImages: q.hasImages,
+      images: q.images
+    };
+
+    var ans = answers[q.number];
+    if (!ans) {
+      throw new Error("Missing answer for question " + q.number);
+    }
+
+    // Handle different question types
+    switch (q.type) {
+      case QUESTION_TYPES.FILL_IN_BLANK:
+      case QUESTION_TYPES.NUMERIC:
+        return Object.assign({}, base, { 
+          correctAnswers: [ans.value]  // Wrap in array for fill-in-blank
+        });
+
+      case QUESTION_TYPES.MULTIPLE_CHOICE:
+      case QUESTION_TYPES.TRUE_FALSE:
+        var opts = q.options.map(function(opt) {
+          return { 
+            text: opt.text, 
+            isCorrect: opt.letter === ans.value,
+            hasImages: opt.hasImages || false,
+            images: opt.images || []
+          };
+        });
+        var shuffled = shuffleAnswerArray(opts);
+        var correctIndex = shuffled.findIndex(function(opt) { return opt.isCorrect; });
+        return Object.assign({}, base, { 
+          correctAnswerIndex: correctIndex, 
+          options: shuffled.map(function(opt) { 
+            return {
+              text: opt.text,
+              hasImages: opt.hasImages,
+              images: opt.images
+            };
+          })
+        });
+
+      case QUESTION_TYPES.SHORT_ANSWER:
+        return Object.assign({}, base, {
+          correctAnswers: [ans.value]
+        });
+
+      case QUESTION_TYPES.ESSAY:
+        return Object.assign({}, base, {
+          sampleAnswer: ans.value
+        });
+
+      case QUESTION_TYPES.MATCHING:
+        return Object.assign({}, base, {
+          correctMatches: ans.value
+        });
+
+      case QUESTION_TYPES.ORDERING:
+        return Object.assign({}, base, {
+          correctOrder: ans.value
+        });
+
+      default:
+        console.error('Unknown question type:', q.type, 'for question', q.number);
+        throw new Error("Unknown question type for question " + q.number);
+    }
+  });
+}
