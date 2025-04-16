@@ -1,0 +1,14 @@
+/**
+ * BlackboardQuestionParsing.gs – Blackboard‑specific question parsing.
+ */
+function BlackboardQuestionParsing_parseQuestions() {
+  return parseQuestions().questions;
+}
+
+
+
+
+function BlackboardQuestionParsing_getImages() {
+  var result = parseQuestions();
+  return result.images || [];
+}
