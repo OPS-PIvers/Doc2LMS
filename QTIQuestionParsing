@@ -1,0 +1,16 @@
+/**
+ * QTIQuestionParsing.gs – QTI‑specific question parsing.
+ * For production, you may enhance the parsing rules.
+ */
+function QTIQuestionParsing_parseQuestions() {
+  // Re-use our generic parseQuestions() defined in AnswerKeyParsing.gs
+  return parseQuestions().questions;
+}
+
+
+
+
+function QTIQuestionParsing_getImages() {
+  var result = parseQuestions();
+  return result.images || [];
+}
