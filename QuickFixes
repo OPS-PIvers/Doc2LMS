@@ -1,0 +1,92 @@
+/**
+ * QuickFixes.gs – Functions for automatically fixing formatting issues.
+ */
+function applyQuickFixes() {
+  var doc = DocumentApp.getActiveDocument();
+  var body = doc.getBody();
+  var modified = false;
+  var count = body.getNumChildren();
+  for (var i = 0; i < count; i++) {
+    var child = body.getChild(i);
+    if (child.getType() === DocumentApp.ElementType.PARAGRAPH ||
+        child.getType() === DocumentApp.ElementType.LIST_ITEM) {
+      var text = child.getText();
+      var orig = text;
+      text = fixOptionFormatting(text);
+      text = fixAnswerKeyFormatting(text);
+      text = fixQuestionNumbering(text);
+      if (text !== orig) {
+        if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+          child.asParagraph().setText(text);
+        } else {
+          child.asListItem().setText(text);
+        }
+        modified = true;
+      }
+    }
+  }
+  return modified;
+}
+
+function previewQuickFixes() {
+  var doc = DocumentApp.getActiveDocument();
+  var body = doc.getBody();
+  var changes = [];
+  var count = body.getNumChildren();
+  for (var i = 0; i < count; i++) {
+    var child = body.getChild(i);
+    if (child.getType() === DocumentApp.ElementType.PARAGRAPH ||
+        child.getType() === DocumentApp.ElementType.LIST_ITEM) {
+      var text = child.getText();
+      var result = testQuickFixes(text);
+      if (result.wasModified) {
+        changes.push({ lineNumber: i + 1, original: result.original, fixed: result.fixed });
+      }
+    }
+  }
+  return changes;
+}
+
+function applyQuickFixesToRange(text) {
+  text = fixOptionFormatting(text);
+  text = fixAnswerKeyFormatting(text);
+  text = fixQuestionNumbering(text);
+  return text;
+}
+
+function testQuickFixes(text) {
+  var orig = text;
+  var fixed = applyQuickFixesToRange(text);
+  return { wasModified: orig !== fixed, original: orig, fixed: fixed };
+}
+
+function fixOptionFormatting(text) {
+  var patterns = [/^\s*\(?[A-Da-d]\)?[\s.)-]/, /^\s*[A-Da-d][\s.)-]/];
+  if (patterns.some(function(p) { return p.test(text); })) {
+    text = text.replace(/^\s+/, "");
+    text = text.replace(/^([A-Da-d])[.)\s-]+/i, "($1) ");
+    text = text.replace(/^\(([A-Da-d])\)[.)\s-]+/i, "($1) ");
+    text = text.replace(/^\(([a-d])\)/, function(m, l) { return "(" + l.toUpperCase() + ")"; });
+  }
+  return text;
+}
+
+function fixAnswerKeyFormatting(text) {
+  var patterns = [/^\s*\d+\s*[.)-]\s*[A-Da-d]\s*$/, /^\s*[A-Da-d]\s*$/];
+  if (patterns.some(function(p) { return p.test(text); })) {
+    text = text.trim();
+    text = text.replace(/^(\d+)\s*[.)-]\s*([A-Da-d])\s*$/, "$1. $2");
+    text = text.replace(/([A-Da-d])$/, function(m) { return m.toUpperCase(); });
+  }
+  return text;
+}
+
+function fixQuestionNumbering(text) {
+  var pattern = /^\s*\d+\s*[.)-]/;
+  if (pattern.test(text)) {
+    text = text.replace(/^\s+/, "");
+    text = text.replace(/^(\d+)\s*[.)-]+/, "$1. ");
+    text = text.replace(/^(\d+\.) +/, "$1 ");
+  }
+  return text;
+}
