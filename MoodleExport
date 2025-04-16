@@ -1,0 +1,275 @@
+/**
+ * MoodleExport.gs – Exports the quiz as a Moodle XML package.
+ *
+ * This module creates a folder structure for Moodle:
+ *   - A main folder ("MoodleExport")
+ *   - A “resources” folder (for images)
+ *   - A Moodle XML file (moodle.xml) that contains the quiz questions
+ *   - A manifest file (imsmanifest.xml)
+ *
+ * Finally the folder is zipped into a package.
+ */
+function MoodleExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
+  try {
+    // Create a dedicated folder for the Moodle export.
+    var moodleFolder = projectFolder.createFolder("MoodleExport");
+    var resourcesFolder = moodleFolder.createFolder("resources");
+   
+    // Save image files into the resources folder.
+    if (images && images.length > 0) {
+      var processed = {};
+      images.forEach(function(img) {
+        if (img.blob && !processed[img.filename]) {
+          // Save image file with its filename.
+          resourcesFolder.createFile(img.blob).setName(img.filename);
+          processed[img.filename] = true;
+        }
+      });
+    }
+   
+    // Build the Moodle XML and manifest.
+    var moodleXml = createMoodleXML(quizTitle, questionsData);
+    var manifestContent = createMoodleManifest(quizTitle);
+   
+    // Create the XML files.
+    var xmlFile = moodleFolder.createFile("moodle.xml", moodleXml, "application/xml");
+    var manifestFile = moodleFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
+   
+    // Prepare files for zipping.
+    var files = [
+      manifestFile.getBlob().setName("imsmanifest.xml"),
+      xmlFile.getBlob().setName("moodle.xml")
+    ];
+   
+    // Add resource files.
+    var resFiles = resourcesFolder.getFiles();
+    while (resFiles.hasNext()) {
+      var file = resFiles.next();
+      files.push(file.getBlob().setName("resources/" + file.getName()));
+    }
+   
+    // Create the final ZIP package.
+    var zipBlob = Utilities.zip(files, quizTitle + "_Moodle.zip");
+    var exportFile = moodleFolder.createFile(zipBlob);
+   
+    // Save the export file ID for later download.
+    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
+   
+    return {
+      success: true,
+      fileUrl: exportFile.getUrl(),
+      exportFolderUrl: moodleFolder.getUrl(),
+      exportFileId: exportFile.getId()
+    };
+  } catch (e) {
+    console.error("Moodle export error: " + e);
+    throw new Error("Failed to create Moodle export files: " + e.message);
+  }
+}
+
+
+/**
+ * createMoodleXML(quizTitle, questionsData)
+ *
+ * This function converts the quiz questions (and associated data)
+ * into Moodle XML format. It handles multiple question types:
+ *   - Multiple Choice / True-False
+ *   - Fill in the Blank / Numeric
+ *   - Short Answer
+ *   - Essay
+ *   - Matching
+ *   - Ordering
+ *
+ * For each question type, a dedicated helper function is called.
+ */
+function createMoodleXML(quizTitle, questionsData) {
+  var xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  xml += '<quiz>\n';
+ 
+  questionsData.forEach(function(q, idx) {
+    var qnum = idx + 1;
+    // Dispatch based on question type.
+    switch (q.type) {
+      case QUESTION_TYPES.MULTIPLE_CHOICE:
+      case QUESTION_TYPES.TRUE_FALSE:
+        xml += createMoodleMultipleChoice(q, qnum);
+        break;
+      case QUESTION_TYPES.FILL_IN_BLANK:
+      case QUESTION_TYPES.NUMERIC:
+        xml += createMoodleShortAnswer(q, qnum);
+        break;
+      case QUESTION_TYPES.SHORT_ANSWER:
+        xml += createMoodleShortAnswer(q, qnum);
+        break;
+      case QUESTION_TYPES.ESSAY:
+        xml += createMoodleEssay(q, qnum);
+        break;
+      case QUESTION_TYPES.MATCHING:
+        xml += createMoodleMatching(q, qnum);
+        break;
+      case QUESTION_TYPES.ORDERING:
+        xml += createMoodleOrdering(q, qnum);
+        break;
+      default:
+        // Default to short answer.
+        xml += createMoodleShortAnswer(q, qnum);
+    }
+  });
+ 
+  xml += '</quiz>';
+  return xml;
+}
+
+
+/**
+ * createMoodleManifest(quizTitle, resourceEntries)
+ *
+ * Although Moodle XML import does not strictly require a manifest,
+ * this function builds one for consistency with other export modules.
+ */
+function createMoodleManifest(quizTitle, resourceEntries) {
+  resourceEntries = resourceEntries || [];
+  var sanitized = quizTitle.replace(/[<>&'"]/g, "");
+  var manifest = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  manifest += '<manifest>\n';
+  manifest += '  <metadata>\n';
+  manifest += '    <title>' + sanitized + '</title>\n';
+  manifest += '    <schemaversion>1.0</schemaversion>\n';
+  manifest += '  </metadata>\n';
+  manifest += '  <resources>\n';
+  manifest += resourceEntries.join("\n");
+  manifest += '\n  </resources>\n';
+  manifest += '</manifest>';
+  return manifest;
+}
+
+
+/* Moodle XML Question Builders */
+
+
+/**
+ * createMoodleMultipleChoice(question, qnum)
+ *
+ * Builds a Moodle XML <question type="multichoice"> element.
+ */
+function createMoodleMultipleChoice(question, qnum) {
+  var xml = '  <question type="multichoice">\n';
+  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
+  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
+  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
+  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
+  xml += '    <penalty>0.3333333</penalty>\n';
+  xml += '    <hidden>0</hidden>\n';
+  xml += '    <shuffleanswers>1</shuffleanswers>\n';
+  xml += '    <answernumbering>abc</answernumbering>\n';
+ 
+  if (question.options && question.options.length > 0) {
+    question.options.forEach(function(opt, idx) {
+      var fraction = (idx === question.correctAnswerIndex) ? 100 : 0;
+      xml += '    <answer fraction="' + fraction + '" format="html">\n';
+      xml += '      <text><![CDATA[' + opt + ']]></text>\n';
+      xml += '      <feedback format="html"><text><![CDATA[]]></text></feedback>\n';
+      xml += '    </answer>\n';
+    });
+  }
+ 
+  xml += '  </question>\n';
+  return xml;
+}
+
+
+/**
+ * createMoodleShortAnswer(question, qnum)
+ *
+ * Handles fill-in-the-blank, numeric, or short answer questions.
+ */
+function createMoodleShortAnswer(question, qnum) {
+  var xml = '  <question type="shortanswer">\n';
+  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
+  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
+  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
+  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
+  xml += '    <penalty>0.3333333</penalty>\n';
+  xml += '    <hidden>0</hidden>\n';
+ 
+  if (question.correctAnswers && question.correctAnswers.length > 0) {
+    // Moodle expects one answer for shortanswer; if there are multiple, you might use multiple answers.
+    xml += '    <answer fraction="100" format="html"><text><![CDATA[' + question.correctAnswers[0] + ']]></text>\n';
+    xml += '      <feedback format="html"><text><![CDATA[]]></text></feedback>\n';
+    xml += '    </answer>\n';
+  }
+ 
+  xml += '  </question>\n';
+  return xml;
+}
+
+
+/**
+ * createMoodleEssay(question, qnum)
+ *
+ * Builds a Moodle XML <question type="essay"> element.
+ */
+function createMoodleEssay(question, qnum) {
+  var xml = '  <question type="essay">\n';
+  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
+  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
+  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
+  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
+  xml += '    <penalty>0.0000000</penalty>\n';
+  xml += '    <hidden>0</hidden>\n';
+  xml += '  </question>\n';
+  return xml;
+}
+
+
+/**
+ * createMoodleMatching(question, qnum)
+ *
+ * Builds a Moodle XML <question type="matching"> element.
+ * Assumes question.options is an array of objects { left: string, right: string }.
+ */
+function createMoodleMatching(question, qnum) {
+  var xml = '  <question type="matching">\n';
+  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
+  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
+  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
+  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
+  xml += '    <penalty>0.3333333</penalty>\n';
+  xml += '    <hidden>0</hidden>\n';
+  // Moodle matching questions use subquestions for each pair.
+  if (question.options && question.options.length > 0) {
+    question.options.forEach(function(pair, idx) {
+      xml += '    <subquestion>\n';
+      xml += '      <subquestiontext format="html"><text><![CDATA[' + pair.left + ']]></text></subquestiontext>\n';
+      xml += '      <answer fraction="100" format="html"><text><![CDATA[' + pair.right + ']]></text></answer>\n';
+      xml += '    </subquestion>\n';
+    });
+  }
+  xml += '  </question>\n';
+  return xml;
+}
+
+
+/**
+ * createMoodleOrdering(question, qnum)
+ *
+ * Builds a Moodle XML <question type="ordering"> element.
+ * Assumes question.options is an array of strings representing the correct order.
+ */
+function createMoodleOrdering(question, qnum) {
+  var xml = '  <question type="ordering">\n';
+  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
+  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
+  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
+  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
+  xml += '    <penalty>0.3333333</penalty>\n';
+  xml += '    <hidden>0</hidden>\n';
+  if (question.options && question.options.length > 0) {
+    question.options.forEach(function(item) {
+      xml += '    <item><![CDATA[' + item + ']]></item>\n';
+    });
+  }
+  xml += '  </question>\n';
+  return xml;
+}
