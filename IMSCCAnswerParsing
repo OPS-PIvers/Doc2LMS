@@ -1,0 +1,6 @@
+/**
+ * IMSCCAnswerParsing.gs – IMSCC‑specific answer parsing.
+ */
+function IMSCCAnswerParsing_parseAnswers() {
+  return parseAnswerKey();
+}
