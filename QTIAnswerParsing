@@ -1,0 +1,6 @@
+/**
+ * QTIAnswerParsing.gs – QTI‑specific answer parsing.
+ */
+function QTIAnswerParsing_parseAnswers() {
+  return parseAnswerKey();
+}
