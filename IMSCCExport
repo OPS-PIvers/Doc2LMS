@@ -1,322 +1,224 @@
 /**
- * IMSCCExport.gs – Exports the quiz as an IMS Common Cartridge (.imscc) package.
+ *  IMSCCExport.gs – IMS Common Cartridge (.imscc) exporter
+ *  Depends on Utilities.gs (sanitizeHtml, replaceImageTags, RES_PATH)
+ *  ------------------------------------------------------------------
+ */
+
+'use strict';
+
+/**
+ * Main entry called by startConversion().
+ * @return {Object} status payload
  */
 function IMSCCExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
-  if (!projectFolder || !quizTitle) throw new Error('Project folder and quiz title are required');
-  try {
-    // Batch-create subfolders
-    const { ccres0000001: ccresFolder, resources: resourcesFolder } =
-      Utilities_shared.createSubfolders(projectFolder, ['ccres0000001', 'resources']);
+  if (!projectFolder || !quizTitle) throw new Error('Project folder & title required');
 
-    // Process images once, build imageMap
-    const imageMap = processImages(images, resourcesFolder);
+  // 1 ‒ folder scaffolding
+  const ccresFolder     = projectFolder.createFolder('ccres0000001');
+  const resourcesFolder = projectFolder.createFolder('resources');
 
-    // Generate QTI XML and manifest
-    const qtiXml = createSchoologyQTI(quizTitle, questionsData, imageMap);
-    const manifestContent = createManifestFile(quizTitle, generateResourceEntries(imageMap));
+  // 2 ‒ image processing
+  const imageMap = IMSCC_processImages(images, resourcesFolder);
 
-    // Create XML files in-memory blobs
-    const xmlBlob = Utilities.newBlob(qtiXml, 'application/xml', 'ccres0000001.xml');
-    const manifestBlob = Utilities.newBlob(manifestContent, 'application/xml', 'imsmanifest.xml');
+  // 3 ‒ generate XML files
+  const qtiXml      = IMSCC_createQTI(quizTitle, questionsData, imageMap);
+  const manifestXml = IMSCC_createManifestFile(
+                          quizTitle,
+                          IMSCC_generateResourceEntries(imageMap));
 
-    // Collect all blobs for zipping
-    const filesToZip = [
-      xmlBlob.setName('ccres0000001/ccres0000001.xml'),
-      manifestBlob.setName('imsmanifest.xml')
-    ];
-    resourcesFolder.getFiles().forEach(f => {
-      filesToZip.push(f.getBlob().setName('resources/' + f.getName()));
-    });
+  // 4 ‒ write files into sub‑folders
+  const qtiFile      = ccresFolder  .createFile('ccres0000001.xml', qtiXml,      XML_MIME);
+  const manifestFile = projectFolder.createFile('imsmanifest.xml',  manifestXml, XML_MIME);
 
-    // Create ZIP package
-    const zipBlob = Utilities.zip(filesToZip, `${projectFolder.getName()}.imscc`);
-    const exportFile = projectFolder.createFile(zipBlob);
+  // 5 ‒ collect blobs for zip
+  const blobs = [
+    qtiFile     .getBlob().setName('ccres0000001/ccres0000001.xml'),
+    manifestFile.getBlob().setName('imsmanifest.xml')
+  ];
 
-    // Store properties
-    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
-
-    return {
-      success: true,
-      imsccFileUrl: exportFile.getUrl(),
-      exportFolderUrl: projectFolder.getUrl(),
-      imsccFileId: exportFile.getId()
-    };
-  } catch (e) {
-    console.error('IMSCC export error:', e);
-    throw new AppError(
-      `IMSCC export failed (internal): ${e.message}`,
-      'Failed to export quiz. Please verify your questions and try again.'
-    );
+  const resIter = resourcesFolder.getFiles();
+  while (resIter.hasNext()) {
+    const f = resIter.next();
+    blobs.push(f.getBlob().setName('resources/' + f.getName()));
   }
+
+  // 6 ‒ zip & finish
+  const zipBlob   = Utilities.zip(blobs, quizTitle + '.imscc');
+  const exportFile = projectFolder.createFile(zipBlob);
+  PropertiesService.getScriptProperties()
+        .setProperties({ lastExportFileId: exportFile.getId(),
+                         lastExportFileName: exportFile.getName() });
+
+  return { success: true,
+           imsccFileUrl: exportFile.getUrl(),
+           exportFolderUrl: projectFolder.getUrl(),
+           imsccFileId: exportFile.getId() };
 }
 
+/*──────────────────────── helper functions ────────────────────────*/
 
-/**
- * Processes the images array and saves each image file to the resources folder.
- * Returns a Map where each key is the image filename (e.g., "question_1_image_<id>.png")
- * and the value is the Drive file ID.
- */
-function processImages(images, resourcesFolder) {
-  var imageMap = new Map();
-  if (images && images.length > 0) {
-    var processedFiles = {};
-    images.forEach(function(img) {
-      if (img.blob && !processedFiles[img.filename]) {
-        var file = resourcesFolder.createFile(img.blob);
-        imageMap.set(img.filename, file.getId());
-        processedFiles[img.filename] = true;
-      }
-    });
-  }
-  return imageMap;
-}
-
-
-/**
- * Generates resource entries for the manifest file from the imageMap.
- */
-function generateResourceEntries(imageMap) {
-  var entries = [];
-  imageMap.forEach(function(id, filename) {
-    entries.push('<file href="resources/' + filename + '"/>');
+function IMSCC_processImages(images, resourcesFolder) {
+  const map = new Map();
+  if (!images) return map;
+  const seen = {};
+  images.forEach(function (img) {
+    if (!img.blob || seen[img.filename]) return;
+    const file = resourcesFolder.createFile(img.blob).setName(img.filename);
+    map.set(img.filename, file.getId());
+    seen[img.filename] = true;
   });
-  return entries;
+  return map;
 }
 
+function IMSCC_generateResourceEntries(imageMap) {
+  const out = [];
+  imageMap.forEach(function (_id, fn) {
+    out.push(`<file href="resources/${fn}"/>`);
+  });
+  return out;
+}
 
-/**
- * Creates the Schoology QTI XML.
- */
-function createSchoologyQTI(quizTitle, questionsData, imageMap) {
-  var assessmentId = "ccres" + Math.random().toString().substring(2, 10);
-  var sanitizedTitle = sanitizeHtml(quizTitle);
-  var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
-            '<questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2" \n' +
-            '                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" \n' +
-            '                xsi:schemaLocation="http://www.imsglobal.org/xsd/ims_qtiasiv1p2 \n' +
-            '                http://www.imsglobal.org/profile/cc/ccv1p2/ccv1p2_qtiasiv1p2p1_v1p0.xsd">\n' +
-            '  <assessment ident="' + assessmentId + '" title="' + sanitizedTitle + '">\n' +
-            '    <qtimetadata>\n' +
-            '      <qtimetadatafield>\n' +
-            '        <fieldlabel>cc_profile</fieldlabel>\n' +
-            '        <fieldentry>cc.exam.v0p1</fieldentry>\n' +
-            '      </qtimetadatafield>\n' +
-            '      <qtimetadatafield>\n' +
-            '        <fieldlabel>qmd_assessmenttype</fieldlabel>\n' +
-            '        <fieldentry>Examination</fieldentry>\n' +
-            '      </qtimetadatafield>\n' +
-            '      <qtimetadatafield>\n' +
-            '        <fieldlabel>qmd_scoretype</fieldlabel>\n' +
-            '        <fieldentry>Percentage</fieldentry>\n' +
-            '      </qtimetadatafield>\n' +
-            '    </qtimetadata>\n' +
-            '    <section ident="root_section">';
-  questionsData.forEach(function(question, index) {
-    var questionNumber = index + 1;
-    switch (question.type) {
+function IMSCC_createManifestFile(title, resourceEntries) {
+  const safeTitle = sanitizeHtml(title);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="IMSCC-MANIFEST">
+  <metadata>
+    <schema>IMS Common Cartridge</schema>
+    <schemaversion>1.2.0</schemaversion>
+  </metadata>
+  <organizations>
+    <organization identifier="org">
+      <item identifier="item1" identifierref="ccres0000001">
+        <title>${safeTitle}</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="ccres0000001"
+              type="imsqti_xmlv1p2/imscc_xmlv1p2/assessment"
+              href="ccres0000001/ccres0000001.xml">
+      <file href="ccres0000001/ccres0000001.xml"/>
+      ${resourceEntries.join('\n      ')}
+    </resource>
+  </resources>
+</manifest>`;
+}
+
+/*────── QTI generation ──────*/
+
+function IMSCC_createQTI(title, questions, imageMap) {
+  const assessId   = 'ccres' + Utilities.getUuid().slice(0,8);
+  const safeTitle  = sanitizeHtml(title);
+  let xml =
+`<?xml version="1.0" encoding="UTF-8"?>
+<questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2">
+  <assessment ident="${assessId}" title="${safeTitle}">
+    <qtimetadata>
+      <qtimetadatafield><fieldlabel>cc_profile</fieldlabel><fieldentry>cc.exam.v0p1</fieldentry></qtimetadatafield>
+    </qtimetadata>
+    <section ident="root_section">`;
+
+  questions.forEach(function (q, idx) {
+    const num = idx + 1;
+    switch (q.type) {
       case QUESTION_TYPES.MULTIPLE_CHOICE:
-        xml += createMultipleChoiceXML(question, questionNumber, imageMap);
+        xml += IMSCC_createMultipleChoiceXML(q, num, imageMap);
         break;
       case QUESTION_TYPES.FILL_IN_BLANK:
-        xml += createFillInBlankXML(question, questionNumber, imageMap);
+        xml += IMSCC_createFillInBlankXML(q, num, imageMap);
         break;
-      case QUESTION_TYPES.SHORT_ANSWER:
       default:
-        xml += createShortAnswerXML(question, questionNumber, imageMap);
-        break;
+        xml += IMSCC_createShortAnswerXML(q, num, imageMap);
     }
   });
-  xml += '\n    </section>\n  </assessment>\n</questestinterop>';
+
+  xml += `
+    </section>
+  </assessment>
+</questestinterop>`;
   return xml;
 }
 
+/*──── item writers (namespaced) ────*/
 
-function createMultipleChoiceXML(question, questionNumber, imageMap) {
-  // Sanitize or replace image tags using centralized utility
-  let qText = question.hasImages
-    ? Utilities_shared.replaceImageTags(question.questionText, imageMap, questionNumber)
-    : Utilities_shared.sanitizeHtml(question.questionText);
+function IMSCC_createMultipleChoiceXML(question, qNum, imageMap) {
+  let qText = sanitizeHtml(question.questionText);
+  if (question.hasImages) qText = replaceImageTags(qText, imageMap, qNum);
+  const mattext = /[<&]/.test(qText) ? `<![CDATA[${qText}]]>` : qText;
 
-  const wrappedQuestionText =
-    /[<&]/.test(qText)
-      ? `<![CDATA[${qText}]]>`
-      : qText;
-
-  let xml = `
-      <item ident="${questionNumber}">
+  let xml =
+`      <item ident="${qNum}">
         <presentation>
           <material>
-            <mattext texttype="text/html">${wrappedQuestionText}</mattext>
+            <mattext texttype="text/html">${mattext}</mattext>
           </material>
-          <response_lid ident="${questionNumber}" rcardinality="Single">
-            <render_choice shuffle="No">
-`;
+          <response_lid ident="${qNum}" rcardinality="Single">
+            <render_choice shuffle="No">`;
 
-  question.options.forEach((opt, i) => {
-    const optionId = `choice_${i+1}`;
-    // Use same utilities for option content
-    let content = opt.hasImages
-      ? Utilities_shared.replaceImageTags(opt.text, imageMap, questionNumber)
-      : Utilities_shared.sanitizeHtml(opt.text);
-    xml += `              <response_label ident="${optionId}">
-                <material>
-                  <mattext texttype="text/html"><![CDATA[${content}]]></mattext>
-                </material>
-              </response_label>
-`;
+  question.options.forEach(function (opt, i) {
+    const optId = 'choice_' + (i + 1);
+    let content = opt.hasImages ? opt.text : sanitizeHtml(opt.text);
+    if (opt.hasImages) content = replaceImageTags(content, imageMap, qNum);
+    content = `<![CDATA[${content}]]>`;
+    xml += `
+              <response_label ident="${optId}">
+                <material><mattext texttype="text/html">${content}</mattext></material>
+              </response_label>`;
   });
 
-  xml += `            </render_choice>
+  xml += `
+            </render_choice>
           </response_lid>
         </presentation>
         <resprocessing>
-          <outcomes>
-            <decvar maxvalue="100" minvalue="0" varname="SCORE" vartype="Decimal"/>
-          </outcomes>
+          <outcomes><decvar vartype="Decimal" varname="SCORE" minvalue="0" maxvalue="100"/></outcomes>
           <respcondition continue="No">
-            <conditionvar>
-              <varequal respident="${questionNumber}">choice_${question.correctAnswerIndex+1}</varequal>
-            </conditionvar>
-            <setvar action="Set" varname="SCORE">100</setvar>
+            <conditionvar><varequal respident="${qNum}">choice_${question.correctAnswerIndex + 1}</varequal></conditionvar>
+            <setvar varname="SCORE" action="Set">100</setvar>
           </respcondition>
         </resprocessing>
       </item>`;
-
   return xml;
 }
 
-
-
-/**
- * Creates XML for a fill in the blank question.
- */
-function createFillInBlankXML(question, questionNumber, imageMap) {
-  var questionText = sanitizeHtml(question.questionText);
-  if (question.hasImages) {
-    questionText = replaceImageTags(questionText, imageMap);
-  }
-  var correctAnswers = (question.correctAnswers && Array.isArray(question.correctAnswers))
-                         ? question.correctAnswers
-                         : [];
-  return '\n      <item ident="' + questionNumber + '">\n' +
-         '        <itemmetadata>\n' +
-         '          <qtimetadata>\n' +
-         '            <qtimetadatafield>\n' +
-         '              <fieldlabel>cc_profile</fieldlabel>\n' +
-         '              <fieldentry>cc.fib.v0p1</fieldentry>\n' +
-         '            </qtimetadatafield>\n' +
-         '          </qtimetadata>\n' +
-         '        </itemmetadata>\n' +
-         '        <presentation>\n' +
-         '          <material>\n' +
-         '            <mattext texttype="text/html"><![CDATA[' + questionText + ']]></mattext>\n' +
-         '          </material>\n' +
-         '          <response_str rcardinality="Single" ident="' + questionNumber + '">\n' +
-         '            <render_fib prompt="Dashline"/>\n' +
-         '          </response_str>\n' +
-         '        </presentation>\n' +
-         '        <resprocessing>\n' +
-         '          <outcomes>\n' +
-         '            <decvar maxvalue="100" minvalue="0" varname="SCORE" vartype="Decimal"/>\n' +
-         '          </outcomes>\n' +
-         '          <respcondition continue="No">\n' +
-         '            <conditionvar>\n' +
-         correctAnswers.map(function(ans) {
-           return '<varequal respident="' + questionNumber + '">' + sanitizeHtml(ans) + '</varequal>';
-         }).join("\n              ") + '\n' +
-         '            </conditionvar>\n' +
-         '            <setvar action="Set" varname="SCORE">100</setvar>\n' +
-         '          </respcondition>\n' +
-         '        </resprocessing>\n' +
-         '      </item>';
+function IMSCC_createFillInBlankXML(question, qNum, imageMap) {
+  let text = sanitizeHtml(question.questionText);
+  if (question.hasImages) text = replaceImageTags(text, imageMap, qNum);
+  const answers = (question.correctAnswers || []).map(function (ans) {
+    return `<varequal respident="${qNum}">${sanitizeHtml(ans)}</varequal>`;
+  }).join('\n              ');
+  return `
+      <item ident="${qNum}">
+        <presentation>
+          <material><mattext texttype="text/html"><![CDATA[${text}]]></mattext></material>
+          <response_str ident="${qNum}" rcardinality="Single"><render_fib prompt="Dashline"/></response_str>
+        </presentation>
+        <resprocessing>
+          <outcomes><decvar vartype="Decimal" varname="SCORE" minvalue="0" maxvalue="100"/></outcomes>
+          <respcondition continue="No">
+            <conditionvar>
+              ${answers}
+            </conditionvar>
+            <setvar varname="SCORE" action="Set">100</setvar>
+          </respcondition>
+        </resprocessing>
+      </item>`;
 }
 
-
-/**
- * Creates XML for a short answer (essay) question.
- */
-function createShortAnswerXML(question, questionNumber, imageMap) {
-  var questionText = sanitizeHtml(question.questionText);
-  if (question.hasImages) {
-    questionText = replaceImageTags(questionText, imageMap);
-  }
-  return '\n      <item ident="' + questionNumber + '">\n' +
-         '        <itemmetadata>\n' +
-         '          <qtimetadata>\n' +
-         '            <qtimetadatafield>\n' +
-         '              <fieldlabel>cc_profile</fieldlabel>\n' +
-         '              <fieldentry>cc.essay.v0p1</fieldentry>\n' +
-         '            </qtimetadatafield>\n' +
-         '            <qtimetadatafield>\n' +
-         '              <fieldlabel>qmd_computerscored</fieldlabel>\n' +
-         '              <fieldentry>No</fieldentry>\n' +
-         '            </qtimetadatafield>\n' +
-         '          </qtimetadata>\n' +
-         '        </itemmetadata>\n' +
-         '        <presentation>\n' +
-         '          <material>\n' +
-         '            <mattext texttype="text/html"><![CDATA[' + questionText + ']]></mattext>\n' +
-         '          </material>\n' +
-         '          <response_str rcardinality="Single" ident="' + questionNumber + '">\n' +
-         '            <render_fib>\n' +
-         '              <response_label ident="' + (questionNumber * 10 + 1) + '" rshuffle="No"/>\n' +
-         '            </render_fib>\n' +
-         '          </response_str>\n' +
-         '        </presentation>\n' +
-         '        <resprocessing>\n' +
-         '          <outcomes>\n' +
-         '            <decvar maxvalue="100" minvalue="0" varname="SCORE" vartype="Decimal"/>\n' +
-         '          </outcomes>\n' +
-         '          <respcondition>\n' +
-         '            <conditionvar>\n' +
-         '              <other/>\n' +
-         '            </conditionvar>\n' +
-         '            <setvar action="Set" varname="SCORE">100</setvar>\n' +
-         '          </respcondition>\n' +
-         '        </resprocessing>\n' +
-         '      </item>';
-}
-
-
-/**
- * Creates the manifest file.
- */
-function createManifestFile(quizTitle, resourceEntries) {
-  var sanitizedTitle = sanitizeHtml(quizTitle);
-  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
-         '<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p2/imscp_v1p1" \n' +
-         '    xmlns:lom="http://ltsc.ieee.org/xsd/imsccv1p2/LOM/resource" \n' +
-         '    xmlns:lomimscc="http://ltsc.ieee.org/xsd/imsccv1p2/LOM/manifest" \n' +
-         '    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" \n' +
-         '    identifier="cctd0001" \n' +
-         '    xsi:schemaLocation="http://www.imsglobal.org/xsd/imsccv1p2/imscp_v1p1 \n' +
-         '    http://www.imsglobal.org/profile/cc/ccv1p2/ccv1p2_imscp_v1p2_v1p0.xsd">\n' +
-         "  <metadata>\n" +
-         "    <schema>IMS Common Cartridge</schema>\n" +
-         "    <schemaversion>1.2.0</schemaversion>\n" +
-         "    <lomimscc:lom>\n" +
-         "      <lomimscc:general>\n" +
-         "        <lomimscc:title>\n" +
-         "          <lomimscc:string>" + sanitizedTitle + "</lomimscc:string>\n" +
-         "        </lomimscc:title>\n" +
-         "      </lomimscc:general>\n" +
-         "    </lomimscc:lom>\n" +
-         "  </metadata>\n" +
-         "  <organizations>\n" +
-         "    <organization identifier=\"org\" structure=\"rooted-hierarchy\">\n" +
-         "      <item identifier=\"root\">\n" +
-         '        <item identifier="iden0000001" identifierref="ccres0000001">\n' +
-         "          <title>" + sanitizedTitle + "</title>\n" +
-         "        </item>\n" +
-         "      </item>\n" +
-         "    </organization>\n" +
-         "  </organizations>\n" +
-         "  <resources>\n" +
-         '    <resource identifier="ccres0000001" type="imsqti_xmlv1p2/imscc_xmlv1p2/assessment">\n' +
-         "      <file href=\"ccres0000001/ccres0000001.xml\" />\n" +
-         resourceEntries.join("\n      ") + "\n" +
-         "    </resource>\n" +
-         "  </resources>\n" +
-         "</manifest>";
+function IMSCC_createShortAnswerXML(question, qNum, imageMap) {
+  let text = sanitizeHtml(question.questionText);
+  if (question.hasImages) text = replaceImageTags(text, imageMap, qNum);
+  return `
+      <item ident="${qNum}">
+        <presentation>
+          <material><mattext texttype="text/html"><![CDATA[${text}]]></mattext></material>
+          <response_str ident="${qNum}" rcardinality="Single">
+            <render_fib><response_label ident="${qNum}1" rshuffle="No"/></render_fib>
+          </response_str>
+        </presentation>
+        <resprocessing>
+          <outcomes><decvar vartype="Decimal" varname="SCORE" minvalue="0" maxvalue="100"/></outcomes>
+          <respcondition><conditionvar><other/></conditionvar><setvar varname="SCORE" action="Set">100</setvar></respcondition>
+        </resprocessing>
+      </item>`;
 }
