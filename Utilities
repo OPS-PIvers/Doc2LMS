@@ -1,27 +1,72 @@
 /**
- * Utilities.gs – Helper functions.
+ * Utilities.gs - Shared helper functions for Quiz Converter
+ *
+ * Consolidates core helpers (HTML sanitization, image-tag replacement,
+ * batch folder creation, and option parsing) for reuse across parsing and export modules.
  */
-function standardizeBlankMarkers(text) {
-  if (!text) return "";
-  return text.replace(/_{3,}/g, "___")
-             .replace(/\[\s*blank\s*\]/gi, "___")
-             .replace(/\[\s*\]/g, "___");
-}
 
-function shuffleAnswerArray(array) {
-  var copy = array.slice();
-  for (var i = copy.length - 1; i > 0; i--) {
-    var j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+const Utilities_shared = (() => {
+  /**
+   * Sanitize HTML text to escape XML/HTML entities.
+   * @param {string} text
+   * @return {string}
+   */
+  function sanitizeHtml(text) {
+    if (!text) return '';
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
   }
-  return copy;
-}
 
-function sanitizeHtml(unsafe) {
-  if (!unsafe) return "";
-  return unsafe.replace(/&/g, "&amp;")
-               .replace(/</g, "&lt;")
-               .replace(/>/g, "&gt;")
-               .replace(/"/g, "&quot;")
-               .replace(/'/g, "&apos;");
-}
+  /**
+   * Replace [IMG:id] placeholders with IMS-CC <img> tags.
+   * @param {string} text
+   * @param {Map<string,string>} imageMap - Map of filename→fileId
+   * @param {number|string} questionNumber
+   * @return {string}
+   */
+  function replaceImageTags(text, imageMap, questionNumber) {
+    if (!text) return '';
+    return text.replace(/\[IMG:([^\]]+)\]/g, (match, id) => {
+      const filename = `question_${questionNumber}_image_${id}.png`;
+      if (imageMap && imageMap.has(filename)) {
+        return `<img src="$IMS-CC-FILEBASE$../resources/${filename}" alt=""/>`;
+      }
+      console.warn(`replaceImageTags: filename not found in imageMap: ${filename}`);
+      return match;
+    });
+  }
+
+  /**
+   * Create multiple subfolders in a parent folder.
+   * @param {Folder} parentFolder
+   * @param {string[]} names
+   * @return {{ [name: string]: Folder }}
+   */
+  function createSubfolders(parentFolder, names) {
+    const folders = {};
+    names.forEach(name => {
+      folders[name] = parentFolder.createFolder(name);
+    });
+    return folders;
+  }
+
+  /**
+   * Parse and normalize multiple-choice options using shared logic.
+   * @param {Array} optionsArray
+   * @return {Array}
+   */
+  function parseOptions(optionsArray) {
+    return OptionHandling.parseOptions(optionsArray, 'native');
+  }
+
+  return {
+    sanitizeHtml,
+    replaceImageTags,
+    createSubfolders,
+    parseOptions
+  };
+})();
