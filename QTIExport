@@ -4,56 +4,61 @@
  */
 function QTIExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
   try {
-    var itemsFolder = projectFolder.createFolder("items");
-    var resourcesFolder = projectFolder.createFolder("resources");
-    var imageMap = new Map();
-    if (images && images.length > 0) {
-      var processed = {};
-      images.forEach(function(img) {
-        if (img.blob && !processed[img.filename]) {
-          var file = resourcesFolder.createFile(img.blob).setName(img.filename);
-          imageMap.set(img.filename, file.getId());
-          processed[img.filename] = true;
-        }
-      });
-    }
-    var assessmentXml = createQTIAssessment(quizTitle, questionsData.length);
-    var assessmentFile = projectFolder.createFile("assessment.xml", assessmentXml, "application/xml");
-    questionsData.forEach(function(q, idx) {
-      var itemXml = createQTIItem(q, idx + 1, imageMap);
-      var fname = "item_" + (idx + 1) + ".xml";
-      itemsFolder.createFile(fname, itemXml, "application/xml");
-    });
-    // NEW: Create QTI manifest by calling the new function.
-    var manifestContent = createQTIManifest(quizTitle, questionsData.length, imageMap);
-    var manifestFile = projectFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
-    var files = [
-      manifestFile.getBlob().setName("imsmanifest.xml"),
-      assessmentFile.getBlob().setName("assessment.xml")
-    ];
-    var itemFiles = itemsFolder.getFiles();
-    while (itemFiles.hasNext()) {
-      var f = itemFiles.next();
-      files.push(f.getBlob().setName("items/" + f.getName()));
-    }
-    if (resourcesFolder.getFiles().hasNext()) {
-      var resFiles = resourcesFolder.getFiles();
-      while (resFiles.hasNext()) {
-        var f = resFiles.next();
-        files.push(f.getBlob().setName("resources/" + f.getName()));
+    // Batch-create subfolders
+    const { items: itemsFolder, resources: resourcesFolder } =
+      Utilities_shared.createSubfolders(projectFolder, ['items', 'resources']);
+    const replaceImageTags = (text, imageMap, qNum) =>
+      Utilities_shared.replaceImageTags(text, imageMap, qNum);
+    const sanitizeHtml    = text =>
+      Utilities_shared.sanitizeHtml(text);
+    // Process and save images
+    const imageMap = new Map();
+    images.forEach(img => {
+      if (img.blob && !imageMap.has(img.filename)) {
+        const file = resourcesFolder.createFile(img.blob).setName(img.filename);
+        imageMap.set(img.filename, file.getId());
       }
-    }
-    var zipBlob = Utilities.zip(files, quizTitle + ".zip");
-    var exportFile = projectFolder.createFile(zipBlob);
-    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
+    });
+
+    // Create assessmentTest blob
+    const assessmentXml = createQTIAssessment(quizTitle, questionsData.length);
+    const assessmentBlob = Utilities.newBlob(assessmentXml, 'application/xml', 'assessment.xml');
+
+    // Create item blobs
+    const itemBlobs = questionsData.map((q, i) => {
+      const itemXml = createQTIItem(q, i+1, imageMap);
+      return Utilities.newBlob(itemXml, 'application/xml', `items/item_${i+1}.xml`);
+    });
+
+    // Create manifest blob
+    const manifestXml = createQTIManifest(quizTitle, questionsData.length, imageMap);
+    const manifestBlob = Utilities.newBlob(manifestXml, 'application/xml', 'imsmanifest.xml');
+
+    // Collect all blobs
+    const blobs = [
+      manifestBlob,
+      assessmentBlob,
+      ...itemBlobs
+    ];
+    resourcesFolder.getFiles().forEach(f => blobs.push(f.getBlob().setName('resources/' + f.getName())));
+
+    // Zip once
+    const zipBlob = Utilities.zip(blobs, `${quizTitle}.zip`);
+    const exportFile = projectFolder.createFile(zipBlob);
+
+    // Store props
+    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
+
     return { success: true, exportFileUrl: exportFile.getUrl(), exportFolderUrl: projectFolder.getUrl(), exportFileId: exportFile.getId() };
   } catch (e) {
-    console.error("QTI export error: " + e);
-    throw new Error("Failed to create QTI export files: " + e.message);
+    console.error('QTI export error:', e);
+    throw new AppError(
+      `QTI export failed (internal): ${e.message}`,
+      'Failed to export quiz. Please verify your questions and try again.'
+    );
   }
 }
-
 
 function createQTIAssessment(title, itemCount) {
   var assessmentId = "assessment_" + Utilities.getUuid().replace(/-/g, "");
@@ -78,32 +83,64 @@ function createQTIAssessment(title, itemCount) {
 }
 
 
+/**
+ * Creates a QTI item XML string for one question.
+ *
+ * @param {Object} question    The question object (must have .type, .questionText, .options, .hasImages).
+ * @param {number} index       The 1‑based question number.
+ * @param {Map<string,string>} imageMap  Map from image filename → Drive file ID.
+ * @return {string}            The full QTI <assessmentItem> XML.
+ */
 function createQTIItem(question, index, imageMap) {
-  var itemId = "item" + index;
-  var responseId = "RESPONSE_" + index;
-  var itemXml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    '<assessmentItem xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1" ' +
-    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
-    'xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 ' +
-    'http://www.imsglobal.org/xsd/qti/qtiv2p1/imsqti_v2p1.xsd" ' +
-    'identifier="' + itemId + '" title="Question ' + index +
-    '" adaptive="false" toolName="Doc to LMS" toolVersion="17" timeDependent="false">\n' +
-    '  <responseDeclaration identifier="' + responseId + '" cardinality="single" baseType="' + getBaseType(question.type) + '">\n' +
-    createResponseDeclaration(question, responseId) +
-    '  </responseDeclaration>\n' +
-    '  <outcomeDeclaration identifier="SCORE" cardinality="single" baseType="float">\n' +
-    '    <defaultValue>\n' +
-    '      <value>0</value>\n' +
-    '    </defaultValue>\n' +
-    '  </outcomeDeclaration>\n' +
-    '  <itemBody>\n' +
-    createItemBody(question, responseId, imageMap) +
-    '  </itemBody>\n' +
-    '  <responseProcessing>\n' +
-    createResponseProcessing(question, responseId) +
-    '  </responseProcessing>\n' +
-    '</assessmentItem>';
-  return itemXml;
+  const qNum       = index;  
+  const itemId     = `item${qNum}`;
+  const responseId = `RESPONSE_${qNum}`;
+
+  // Start the assessmentItem element
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<assessmentItem xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 
+                                    http://www.imsglobal.org/xsd/imsqti_v2p1/imsqti_v2p1.xsd"
+                identifier="${itemId}"
+                title="Question ${qNum}"
+                adaptive="false"
+                timeDependent="false">
+  <responseDeclaration identifier="${responseId}"
+                       cardinality="single"
+                       baseType="${getBaseType(question.type)}">
+    ${createResponseDeclaration(question, responseId)}
+  </responseDeclaration>
+  <outcomeDeclaration identifier="SCORE"
+                      cardinality="single"
+                      baseType="float">
+    <defaultValue>
+      <value>0</value>
+    </defaultValue>
+  </outcomeDeclaration>
+  <itemBody>
+    <div class="question-content">`;
+
+  // Question text (with image‐tag replacement or sanitization)
+  let qText = question.questionText;
+  if (question.hasImages) {
+    qText = Utilities_shared.replaceImageTags(qText, imageMap, qNum);
+  } else {
+    qText = Utilities_shared.sanitizeHtml(qText);
+  }
+  xml += qText;
+
+  // Insert the appropriate interaction for the question type
+  xml += `
+    </div>
+    ${createItemBody(question, responseId, imageMap, qNum)}
+  </itemBody>
+  <responseProcessing>
+    ${createResponseProcessing(question, responseId)}
+  </responseProcessing>
+</assessmentItem>`;
+
+  return xml;
 }
 
 
@@ -159,7 +196,10 @@ function createResponseDeclaration(question, responseId) {
 
 function createItemBody(question, responseId, imageMap) {
   var qText = question.questionText;
-  if (question.hasImages) qText = replaceImageTags(qText, imageMap);
+  if (question.hasImages) {
+    // Pass in the questionNumber so the utility can build correct filenames
+    qText = Utilities_shared.replaceImageTags(qText, imageMap, questionNumber);
+  }
   var body = '<div class="question-content">' + qText + '</div>\n';
   switch (question.type) {
     case QUESTION_TYPES.MULTIPLE_CHOICE:
@@ -286,29 +326,6 @@ function createResponseProcessing(question, responseId) {
     default:
       return "";
   }
-}
-
-
-function replaceImageTags(text, imageMap) {
-  if (!text) return "";
-  // For QTI export, we use a relative path pointing to the resources folder.
-  text = text.replace(/<img[^>]*src="[^"]*\/([^/"]+)"[^>]*>/g, function(match, filename) {
-    if (imageMap && imageMap.get(filename)) {
-      return '<img src="resources/' + filename + '" alt=""/>';
-    }
-    return match;
-  });
-  return text;
-}
-
-
-function sanitizeHtml(unsafe) {
-  if (!unsafe) return "";
-  return unsafe.replace(/&/g, "&amp;")
-               .replace(/</g, "&lt;")
-               .replace(/>/g, "&gt;")
-               .replace(/"/g, "&quot;")
-               .replace(/'/g, "&apos;");
 }
 
 
