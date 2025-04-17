@@ -11,63 +11,41 @@
  */
 function MoodleExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
   try {
-    // Create a dedicated folder for the Moodle export.
-    var moodleFolder = projectFolder.createFolder("MoodleExport");
-    var resourcesFolder = moodleFolder.createFolder("resources");
-   
-    // Save image files into the resources folder.
-    if (images && images.length > 0) {
-      var processed = {};
-      images.forEach(function(img) {
-        if (img.blob && !processed[img.filename]) {
-          // Save image file with its filename.
-          resourcesFolder.createFile(img.blob).setName(img.filename);
-          processed[img.filename] = true;
-        }
-      });
-    }
-   
-    // Build the Moodle XML and manifest.
-    var moodleXml = createMoodleXML(quizTitle, questionsData);
-    var manifestContent = createMoodleManifest(quizTitle);
-   
-    // Create the XML files.
-    var xmlFile = moodleFolder.createFile("moodle.xml", moodleXml, "application/xml");
-    var manifestFile = moodleFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
-   
-    // Prepare files for zipping.
-    var files = [
-      manifestFile.getBlob().setName("imsmanifest.xml"),
-      xmlFile.getBlob().setName("moodle.xml")
-    ];
-   
-    // Add resource files.
-    var resFiles = resourcesFolder.getFiles();
-    while (resFiles.hasNext()) {
-      var file = resFiles.next();
-      files.push(file.getBlob().setName("resources/" + file.getName()));
-    }
-   
-    // Create the final ZIP package.
-    var zipBlob = Utilities.zip(files, quizTitle + "_Moodle.zip");
-    var exportFile = moodleFolder.createFile(zipBlob);
-   
-    // Save the export file ID for later download.
-    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
-   
-    return {
-      success: true,
-      fileUrl: exportFile.getUrl(),
-      exportFolderUrl: moodleFolder.getUrl(),
-      exportFileId: exportFile.getId()
-    };
+    // Create main MoodleExport folder first
+    const moodleFolder = projectFolder.createFolder('MoodleExport');
+    const { resources: resourcesFolder } = Utilities_shared.createSubfolders(moodleFolder, ['resources']);
+
+    // Save images
+    images.forEach(img => {
+      if (img.blob) resourcesFolder.createFile(img.blob).setName(img.filename);
+    });
+
+    // Build XML blobs
+    const moodleXml = createMoodleXML(quizTitle, questionsData);
+    const manifestXml = createMoodleManifest(quizTitle);
+    const xmlBlob = Utilities.newBlob(moodleXml, 'application/xml', 'moodle.xml');
+    const manifestBlob = Utilities.newBlob(manifestXml, 'application/xml', 'imsmanifest.xml');
+
+    // Collect blobs
+    const blobs = [xmlBlob, manifestBlob];
+    resourcesFolder.getFiles().forEach(f => blobs.push(f.getBlob().setName('resources/' + f.getName())));
+
+    // Zip and save
+    const zipBlob = Utilities.zip(blobs, `${quizTitle}_Moodle.zip`);
+    const exportFile = moodleFolder.createFile(zipBlob);
+
+    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
+
+    return { success: true, fileUrl: exportFile.getUrl(), exportFolderUrl: moodleFolder.getUrl(), exportFileId: exportFile.getId() };
   } catch (e) {
-    console.error("Moodle export error: " + e);
-    throw new Error("Failed to create Moodle export files: " + e.message);
+    console.error('Moodle export error:', e);
+    throw new AppError(
+      `Moodle export failed (internal): ${e.message}`,
+      'Failed to export quiz. Please verify your questions and try again.'
+    );
   }
 }
-
 
 /**
  * createMoodleXML(quizTitle, questionsData)
