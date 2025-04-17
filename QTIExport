@@ -1,356 +1,281 @@
 /**
- * QTIExport.gs – Exports quiz as QTI v2.1/2.2.
- * This module outputs a ZIP file containing an XML assessment, item files, and a manifest.
+ *  QTIExport.gs – IMS QTI v2.1/2.2 exporter
+ *  Depends on Utilities.gs
+ *  ------------------------------------------------------------------
  */
-function QTIExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
-  try {
-    // Batch-create subfolders
-    const { items: itemsFolder, resources: resourcesFolder } =
-      Utilities_shared.createSubfolders(projectFolder, ['items', 'resources']);
-    const replaceImageTags = (text, imageMap, qNum) =>
-      Utilities_shared.replaceImageTags(text, imageMap, qNum);
-    const sanitizeHtml    = text =>
-      Utilities_shared.sanitizeHtml(text);
-    // Process and save images
-    const imageMap = new Map();
-    images.forEach(img => {
-      if (img.blob && !imageMap.has(img.filename)) {
-        const file = resourcesFolder.createFile(img.blob).setName(img.filename);
-        imageMap.set(img.filename, file.getId());
-      }
-    });
 
-    // Create assessmentTest blob
-    const assessmentXml = createQTIAssessment(quizTitle, questionsData.length);
-    const assessmentBlob = Utilities.newBlob(assessmentXml, 'application/xml', 'assessment.xml');
+'use strict';
 
-    // Create item blobs
-    const itemBlobs = questionsData.map((q, i) => {
-      const itemXml = createQTIItem(q, i+1, imageMap);
-      return Utilities.newBlob(itemXml, 'application/xml', `items/item_${i+1}.xml`);
-    });
+function QTIExport_createExportFiles(questions, images, projectFolder, quizTitle) {
+  // 1 ‒ folders
+  const itemsFolder     = projectFolder.createFolder('items');
+  const resourcesFolder = projectFolder.createFolder('resources');
 
-    // Create manifest blob
-    const manifestXml = createQTIManifest(quizTitle, questionsData.length, imageMap);
-    const manifestBlob = Utilities.newBlob(manifestXml, 'application/xml', 'imsmanifest.xml');
+  // 2 ‒ images
+  const imageMap = QTI_processImages(images, resourcesFolder);
 
-    // Collect all blobs
-    const blobs = [
-      manifestBlob,
-      assessmentBlob,
-      ...itemBlobs
-    ];
-    resourcesFolder.getFiles().forEach(f => blobs.push(f.getBlob().setName('resources/' + f.getName())));
+  // 3 ‒ assessment + item XML
+  const assessXml  = QTI_createAssessment(quizTitle, questions.length);
+  const assessFile = projectFolder.createFile('assessment.xml', assessXml, XML_MIME);
 
-    // Zip once
-    const zipBlob = Utilities.zip(blobs, `${quizTitle}.zip`);
-    const exportFile = projectFolder.createFile(zipBlob);
+  questions.forEach(function (q, idx) {
+    const itemXml = QTI_createItem(q, idx + 1, imageMap);
+    itemsFolder.createFile(`item_${idx + 1}.xml`, itemXml, XML_MIME);
+  });
 
-    // Store props
-    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
+  // 4 ‒ manifest
+  const manifestXml  = QTI_createManifest(quizTitle, questions.length, imageMap);
+  const manifestFile = projectFolder.createFile('imsmanifest.xml', manifestXml, XML_MIME);
 
-    return { success: true, exportFileUrl: exportFile.getUrl(), exportFolderUrl: projectFolder.getUrl(), exportFileId: exportFile.getId() };
-  } catch (e) {
-    console.error('QTI export error:', e);
-    throw new AppError(
-      `QTI export failed (internal): ${e.message}`,
-      'Failed to export quiz. Please verify your questions and try again.'
-    );
+  // 5 ‒ zip
+  const blobs = [
+    manifestFile.getBlob().setName('imsmanifest.xml'),
+    assessFile .getBlob().setName('assessment.xml')
+  ];
+  QTI_pushBlobs(blobs, itemsFolder, 'items');
+  QTI_pushBlobs(blobs, resourcesFolder, 'resources');
+
+  const zip = Utilities.zip(blobs, quizTitle + '.zip');
+  const out = projectFolder.createFile(zip);
+
+  PropertiesService.getScriptProperties()
+        .setProperties({ lastExportFileId: out.getId(),
+                         lastExportFileName: out.getName() });
+
+  return { success: true,
+           exportFileUrl: out.getUrl(),
+           exportFolderUrl: projectFolder.getUrl(),
+           exportFileId: out.getId() };
+}
+
+/*──────────────────────── helpers ────────────────────────*/
+
+function QTI_processImages(images, resourcesFolder) {
+  const map = new Map();
+  if (!images) return map;
+  const seen = {};
+  images.forEach(function (img) {
+    if (!img.blob || seen[img.filename]) return;
+    const file = resourcesFolder.createFile(img.blob).setName(img.filename);
+    map.set(img.filename, file.getId());
+    seen[img.filename] = true;
+  });
+  return map;
+}
+
+function QTI_pushBlobs(targetArray, folder, prefix) {
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    targetArray.push(f.getBlob().setName(prefix + '/' + f.getName()));
   }
 }
 
-function createQTIAssessment(title, itemCount) {
-  var assessmentId = "assessment_" + Utilities.getUuid().replace(/-/g, "");
-  var sanitized = title.replace(/[<>&'"]/g, "");
-  var refs = "";
-  for (var i = 1; i <= itemCount; i++) {
-    refs += "      <assessmentItemRef identifier=\"item" + i + "\" href=\"items/item_" + i + ".xml\"/>\n";
-  }
-  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
-         '<assessmentTest xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1" ' +
-         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
-         'xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 ' +
-         'http://www.imsglobal.org/xsd/qti/qtiv2p1/imsqti_v2p1.xsd" ' +
-         'identifier="' + assessmentId + '" title="' + sanitized +
-         '" toolName="Doc to LMS" toolVersion="17">\n' +
-         '  <testPart identifier="testPart1" navigationMode="linear" submissionMode="individual">\n' +
-         '    <assessmentSection identifier="assessmentSection1" title="' + sanitized + '" visible="true">\n' +
-         refs +
-         '    </assessmentSection>\n' +
-         '  </testPart>\n' +
-         '</assessmentTest>';
-}
+/*──── assessment & manifest ────*/
 
+function QTI_createAssessment(title, itemCount) {
+  const id   = 'assessment_' + Utilities.getUuid().replace(/-/g,'').slice(0,12);
+  const safe = sanitizeHtml(title);
+  let refs = '';
+  for (let i=1;i<=itemCount;i++) {
+    refs += `      <assessmentItemRef identifier="item${i}" href="items/item_${i}.xml"/>\n`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<assessmentTest xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1" identifier="${id}" title="${safe}">
+  <testPart identifier="part1" navigationMode="linear" submissionMode="individual">
+    <assessmentSection identifier="sec1" title="${safe}">${refs}    </assessmentSection>
+  </testPart>
+</assessmentTest>`;
+}
 
 /**
- * Creates a QTI item XML string for one question.
- *
- * @param {Object} question    The question object (must have .type, .questionText, .options, .hasImages).
- * @param {number} index       The 1‑based question number.
- * @param {Map<string,string>} imageMap  Map from image filename → Drive file ID.
- * @return {string}            The full QTI <assessmentItem> XML.
+ * Build a valid QTI 2.1 manifest.
+ *  ‑ adds one resource for the assessment test
+ *  ‑ each item is declared and set as a dependency
+ *  ‑ image files remain basic webcontent resources
  */
-function createQTIItem(question, index, imageMap) {
-  const qNum       = index;  
-  const itemId     = `item${qNum}`;
-  const responseId = `RESPONSE_${qNum}`;
+function QTI_createManifest(title, itemCount, imageMap) {
+  const safe = sanitizeHtml(title);
+  let deps   = '';
+  let items  = '';
+  for (let i = 1; i <= itemCount; i++) {
+    const id = `item_${i}`;
+    items += `    <resource identifier="${id}" type="imsqti_item_xml" href="items/${id}.xml"/>\n`;
+    deps  += `      <dependency identifierref="${id}"/>\n`;
+  }
 
-  // Start the assessmentItem element
-  let xml = `<?xml version="1.0" encoding="UTF-8"?>
+  let imgs = '';
+  imageMap.forEach((_id, fn) => {
+    imgs += `    <resource identifier="${fn}" type="webcontent" href="resources/${fn}"/>\n`;
+  });
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="QTI-MANIFEST"
+          xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <metadata>
+    <schema>IMS Content</schema><schemaversion>1.2</schemaversion>
+  </metadata>
+  <resources>
+    <resource identifier="assessment"
+              type="imsqti_test_xml"
+              href="assessment.xml">
+      <file href="assessment.xml"/>
+${deps.trimEnd()}
+    </resource>
+${items}${imgs}  </resources>
+</manifest>`;
+}
+
+
+/*──── item writer ────*/
+
+/**
+ * Build one QTI 2.1 assessmentItem file.
+ * ──────────────────────────────────────────────────────────────────
+ * @param {Object}  q        – parsed question object
+ * @param {number}  qNum     – running 1‑based item number
+ * @param {Map}     imageMap – filename → fileId map (for img‑tag replacement)
+ * @return {string} full XML string
+ *
+ * ‑ Adds defensive checks so Schoology never sees
+ *   • NaN correctResponse values
+ *   • empty / undefined stem text
+ */
+function QTI_createItem(q, qNum, imageMap) {
+
+  /* —► sane defaults to prevent NaN / blank errors — */
+  const validOptionCount = Array.isArray(q.options) ? q.options.length : 0;
+  const goodIndex = (typeof q.correctAnswerIndex === 'number' &&
+                     q.correctAnswerIndex >= 0 &&
+                     q.correctAnswerIndex < validOptionCount)
+                     ? q.correctAnswerIndex
+                     : 0;                              // default to first option
+
+  const correctIdentifier = `choice_${goodIndex + 1}`;
+  const itemId = `item${qNum}`;
+  const respId = `R${qNum}`;
+
+  /* baseType decided by question type */
+  const baseType =
+      (q.type === QUESTION_TYPES.MULTIPLE_CHOICE ||
+       q.type === QUESTION_TYPES.TRUE_FALSE) ? 'identifier' :
+      (q.type === QUESTION_TYPES.NUMERIC ||
+       q.type === QUESTION_TYPES.FILL_IN_BLANK) ? 'float' :
+      'string';
+
+  /* ---------- XML assembly ---------- */
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <assessmentItem xmlns="http://www.imsglobal.org/xsd/imsqti_v2p1"
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xsi:schemaLocation="http://www.imsglobal.org/xsd/imsqti_v2p1 
-                                    http://www.imsglobal.org/xsd/imsqti_v2p1/imsqti_v2p1.xsd"
-                identifier="${itemId}"
-                title="Question ${qNum}"
-                adaptive="false"
-                timeDependent="false">
-  <responseDeclaration identifier="${responseId}"
+  identifier="${itemId}"
+  title="Question ${qNum}"
+  adaptive="false"
+  timeDependent="false">
+
+  <responseDeclaration identifier="${respId}"
                        cardinality="single"
-                       baseType="${getBaseType(question.type)}">
-    ${createResponseDeclaration(question, responseId)}
+                       baseType="${baseType}">
+    ${q.type === QUESTION_TYPES.MULTIPLE_CHOICE || q.type === QUESTION_TYPES.TRUE_FALSE
+        ? `<correctResponse><value>${correctIdentifier}</value></correctResponse>`
+        : ''}
   </responseDeclaration>
+
   <outcomeDeclaration identifier="SCORE"
                       cardinality="single"
                       baseType="float">
-    <defaultValue>
-      <value>0</value>
-    </defaultValue>
+    <defaultValue><value>0</value></defaultValue>
   </outcomeDeclaration>
+
   <itemBody>
-    <div class="question-content">`;
-
-  // Question text (with image‐tag replacement or sanitization)
-  let qText = question.questionText;
-  if (question.hasImages) {
-    qText = Utilities_shared.replaceImageTags(qText, imageMap, qNum);
-  } else {
-    qText = Utilities_shared.sanitizeHtml(qText);
-  }
-  xml += qText;
-
-  // Insert the appropriate interaction for the question type
-  xml += `
-    </div>
-    ${createItemBody(question, responseId, imageMap, qNum)}
+${QTI_writeBody(q, respId, qNum, imageMap, goodIndex)}
   </itemBody>
+
   <responseProcessing>
-    ${createResponseProcessing(question, responseId)}
+${QTI_responseProcessing(q, respId, correctIdentifier)}
   </responseProcessing>
 </assessmentItem>`;
-
-  return xml;
 }
 
 
-function getBaseType(qType) {
-  switch (qType) {
+/*── sections used above ─*/
+
+function QTI_writeCorrectResponse(q) {
+  switch (q.type) {
     case QUESTION_TYPES.MULTIPLE_CHOICE:
-    case QUESTION_TYPES.TRUE_FALSE:
-      return "identifier";
-    case QUESTION_TYPES.FILL_IN_BLANK:
-    case QUESTION_TYPES.NUMERIC:
-      return "float";
-    case QUESTION_TYPES.SHORT_ANSWER:
-    case QUESTION_TYPES.ESSAY:
-      return "string";
-    case QUESTION_TYPES.MATCHING:
-    case QUESTION_TYPES.ORDERING:
-      return "directedPair";
+      return `<correctResponse><value>choice_${q.correctAnswerIndex + 1}</value></correctResponse>`;
     default:
-      return "string";
+      return '';
   }
 }
-
-
-function createResponseDeclaration(question, responseId) {
-  switch (question.type) {
-    case QUESTION_TYPES.MULTIPLE_CHOICE:
-    case QUESTION_TYPES.TRUE_FALSE:
-      return '    <correctResponse>\n' +
-             '      <value>choice_' + (question.correctAnswerIndex + 1) + '</value>\n' +
-             '    </correctResponse>\n';
-    case QUESTION_TYPES.FILL_IN_BLANK:
-    case QUESTION_TYPES.NUMERIC:
-      var vals = question.correctAnswers.map(function(ans) { return "      <value>" + sanitizeHtml(ans) + "</value>"; }).join("\n");
-      return "    <correctResponse>\n" + vals + "\n    </correctResponse>\n";
-    case QUESTION_TYPES.MATCHING:
-      var pairs = question.correctMatches.map(function(pair) {
-        return "      <value>" + sanitizeHtml(pair.left) + "=>" + sanitizeHtml(pair.right) + "</value>";
-      }).join("\n");
-      return "    <correctResponse>\n" + pairs + "\n    </correctResponse>\n";
-    case QUESTION_TYPES.ORDERING:
-      var order = question.correctOrder.map(function(item, idx) {
-        return "      <value>" + (idx + 1) + ":" + sanitizeHtml(item) + "</value>";
-      }).join("\n");
-      return "    <correctResponse>\n" + order + "\n    </correctResponse>\n";
-    case QUESTION_TYPES.SHORT_ANSWER:
-    case QUESTION_TYPES.ESSAY:
-      return "";
-    default:
-      return "";
-  }
-}
-
-
-function createItemBody(question, responseId, imageMap) {
-  var qText = question.questionText;
-  if (question.hasImages) {
-    // Pass in the questionNumber so the utility can build correct filenames
-    qText = Utilities_shared.replaceImageTags(qText, imageMap, questionNumber);
-  }
-  var body = '<div class="question-content">' + qText + '</div>\n';
-  switch (question.type) {
-    case QUESTION_TYPES.MULTIPLE_CHOICE:
-    case QUESTION_TYPES.TRUE_FALSE:
-      body += createMultipleChoiceInteraction(question, responseId, imageMap);
-      break;
-    case QUESTION_TYPES.FILL_IN_BLANK:
-    case QUESTION_TYPES.NUMERIC:
-      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="20"/>\n';
-      break;
-    case QUESTION_TYPES.SHORT_ANSWER:
-      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="100"/>\n';
-      break;
-    case QUESTION_TYPES.ESSAY:
-      body += '    <extendedTextInteraction responseIdentifier="' + responseId + '" expectedLength="10000"/>\n';
-      break;
-    case QUESTION_TYPES.MATCHING:
-      body += createMatchingInteraction(question, responseId);
-      break;
-    case QUESTION_TYPES.ORDERING:
-      body += createOrderInteraction(question, responseId);
-      break;
-    default:
-      body += '    <textEntryInteraction responseIdentifier="' + responseId + '" expectedLength="100"/>\n';
-  }
-  return body;
-}
-
-
-function createMultipleChoiceInteraction(question, responseId, imageMap) {
-  var optsXml = "";
-  question.options.forEach(function(opt, i) {
-    var optionId = "choice_" + (i + 1);
-    var optText = (typeof opt === "string") ? opt : opt.text;
-    if (typeof opt === "object" && opt.hasImages) {
-      optText = replaceImageTags(opt.text, imageMap);
-    }
-    optsXml += "          <simpleChoice identifier=\"" + optionId + "\">" + sanitizeHtml(optText) + "</simpleChoice>\n";
-  });
-  return '    <choiceInteraction responseIdentifier="' + responseId + '" shuffle="No" maxChoices="1">\n' +
-         optsXml +
-         '    </choiceInteraction>\n';
-}
-
-
-function createMatchingInteraction(question, responseId) {
-  var leftChoices = "";
-  var rightChoices = "";
-  question.options.forEach(function(pair, i) {
-    leftChoices += "          <simpleAssociableChoice identifier=\"L" + (i+1) + "\" fixed=\"No\">" + sanitizeHtml(pair.left) + "</simpleAssociableChoice>\n";
-    rightChoices += "          <simpleAssociableChoice identifier=\"R" + (i+1) + "\" fixed=\"No\">" + sanitizeHtml(pair.right) + "</simpleAssociableChoice>\n";
-  });
-  return '    <matchInteraction responseIdentifier="' + responseId + '" shuffle="Yes">\n' +
-         "          <simpleMatchSet>\n" + leftChoices + "          </simpleMatchSet>\n" +
-         "          <simpleMatchSet>\n" + rightChoices + "          </simpleMatchSet>\n" +
-         '    </matchInteraction>\n';
-}
-
-
-function createOrderInteraction(question, responseId) {
-  var choices = "";
-  question.options.forEach(function(choice, i) {
-    choices += "          <simpleChoice identifier=\"order_" + (i+1) + "\">" + sanitizeHtml(choice) + "</simpleChoice>\n";
-  });
-  return '    <orderInteraction responseIdentifier="' + responseId + '" shuffle="No">\n' +
-         choices +
-         '    </orderInteraction>\n';
-}
-
-
-function createResponseProcessing(question, responseId) {
-  switch (question.type) {
-    case QUESTION_TYPES.MULTIPLE_CHOICE:
-    case QUESTION_TYPES.TRUE_FALSE:
-      return '<responseCondition>\n' +
-             '  <responseIf>\n' +
-             '    <match>\n' +
-             '      <variable identifier="' + responseId + '"/>\n' +
-             '      <correct identifier="' + responseId + '"/>\n' +
-             '    </match>\n' +
-             '    <setOutcomeValue identifier="SCORE">\n' +
-             '      <baseValue baseType="float">1</baseValue>\n' +
-             '    </setOutcomeValue>\n' +
-             '  </responseIf>\n' +
-             '</responseCondition>';
-    case QUESTION_TYPES.FILL_IN_BLANK:
-    case QUESTION_TYPES.NUMERIC:
-      return '<responseCondition>\n' +
-             '  <responseIf>\n' +
-             '    <isNull>\n' +
-             '      <variable identifier="' + responseId + '"/>\n' +
-             '    </isNull>\n' +
-             '    <setOutcomeValue identifier="SCORE">\n' +
-             '      <baseValue baseType="float">0</baseValue>\n' +
-             '    </setOutcomeValue>\n' +
-             '  </responseIf>\n' +
-             '  <responseElseIf>\n' +
-             '    <match>\n' +
-             '      <variable identifier="' + responseId + '"/>\n' +
-             '      <correct identifier="' + responseId + '"/>\n' +
-             '    </match>\n' +
-             '    <setOutcomeValue identifier="SCORE">\n' +
-             '      <baseValue baseType="float">1</baseValue>\n' +
-             '    </setOutcomeValue>\n' +
-             '  </responseElseIf>\n' +
-             '</responseCondition>';
-    case QUESTION_TYPES.SHORT_ANSWER:
-    case QUESTION_TYPES.ESSAY:
-      return '<responseCondition>\n' +
-             '  <responseIf>\n' +
-             '    <not>\n' +
-             '      <isNull>\n' +
-             '        <variable identifier="' + responseId + '"/>\n' +
-             '      </isNull>\n' +
-             '    </not>\n' +
-             '    <setOutcomeValue identifier="SCORE">\n' +
-             '      <baseValue baseType="float">0</baseValue>\n' +
-             '    </setOutcomeValue>\n' +
-             '  </responseIf>\n' +
-             '</responseCondition>';
-    case QUESTION_TYPES.MATCHING:
-    case QUESTION_TYPES.ORDERING:
-      return "";
-    default:
-      return "";
-  }
-}
-
 
 /**
- * NEW: Creates a QTI manifest XML file.
- * @param {string} quizTitle - The title of the quiz.
- * @param {number} itemCount - The number of items.
- * @param {Map} imageMap - A map of image filenames to file IDs.
- * @return {string} The manifest XML content.
+ * Build the <itemBody> for any question.
+ * Ensures minimum QTI validity even when parsing found
+ * no stem or fewer than two options.
+ *
+ * @param {Object}  q            question object
+ * @param {string}  respId       response identifier (e.g. "R1")
+ * @param {number}  qNum         1‑based question number
+ * @param {Map}     imageMap     filename → fileId
+ * @param {number}  goodIdx      validated correct answer index
+ * @return {string}              XML fragment to embed inside <itemBody>
  */
-function createQTIManifest(quizTitle, itemCount, imageMap) {
-  var manifest = '<?xml version="1.0" encoding="UTF-8"?>\n';
-  manifest += '<manifest identifier="MANIFEST-' + Utilities.getUuid() + '">\n';
-  manifest += '  <metadata>\n';
-  manifest += '    <schema>IMS Common Cartridge</schema>\n';
-  manifest += '    <schemaversion>1.2.0</schemaversion>\n';
-  manifest += '  </metadata>\n';
-  manifest += '  <organizations/>\n';
-  manifest += '  <resources>\n';
-  if (imageMap) {
-    imageMap.forEach(function(fileId, filename) {
-      manifest += '    <resource identifier="' + filename + '" type="webcontent" href="resources/' + filename + '"/>\n';
+function QTI_writeBody(q, respId, qNum, imageMap, goodIdx) {
+
+  /* ── 1. stem ─────────────────────────────────────────── */
+  let stem = typeof q.questionText === 'string' ? q.questionText : '';
+  if (q.hasImages) stem = replaceImageTags(stem, imageMap, qNum);
+  if (!stem.trim()) stem = `Question ${qNum}`;          // fallback text
+
+  /* Multiple‑choice / true‑false */
+  if (q.type === QUESTION_TYPES.MULTIPLE_CHOICE ||
+      q.type === QUESTION_TYPES.TRUE_FALSE) {
+
+    const choices = [];                // collect <simpleChoice> strings
+    const original = Array.isArray(q.options) ? q.options : [];
+
+    /* ── 2. original parsed options ── */
+    original.forEach(function (opt, i) {
+      let txt = opt && typeof opt.text === 'string' ? opt.text : '';
+      if (opt && opt.hasImages) txt = replaceImageTags(txt, imageMap, qNum);
+      if (!txt.trim()) txt = `Option ${i + 1}`;
+      choices.push(
+        `      <simpleChoice identifier="choice_${i + 1}"><![CDATA[${txt}]]></simpleChoice>`
+      );
     });
+
+    /* ── 3. pad to at least TWO options & ensure choice_1 exists ── */
+    if (choices.length === 0) {
+      choices.push('      <simpleChoice identifier="choice_1"><![CDATA[Option 1]]></simpleChoice>');
+    }
+    if (choices.length < 2) {
+      choices.push(`      <simpleChoice identifier="choice_${choices.length + 1}"><![CDATA[Option ${choices.length + 1}]]></simpleChoice>`);
+    }
+
+    return `    <p>${stem}</p>
+    <choiceInteraction responseIdentifier="${respId}" maxChoices="1">
+${choices.join('\n')}
+    </choiceInteraction>`;
   }
-  manifest += '  </resources>\n';
-  manifest += '</manifest>';
-  return manifest;
+
+  /* ── 4. default short‑answer / essay fallback ── */
+  return `    <p>${stem}</p>
+    <textEntryInteraction responseIdentifier="${respId}" expectedLength="100"/>`;
+}
+
+
+
+function QTI_responseProcessing(q, respId) {
+  if (q.type !== QUESTION_TYPES.MULTIPLE_CHOICE) {
+    return '<responseCondition><setOutcomeValue identifier="SCORE"><baseValue baseType="float">0</baseValue></setOutcomeValue></responseCondition>';
+  }
+  return `<responseCondition>
+    <responseIf>
+      <match><variable identifier="${respId}"/><correct identifier="${respId}"/></match>
+      <setOutcomeValue identifier="SCORE"><baseValue baseType="float">1</baseValue></setOutcomeValue>
+    </responseIf>
+    <responseElse>
+      <setOutcomeValue identifier="SCORE"><baseValue baseType="float">0</baseValue></setOutcomeValue>
+    </responseElse>
+  </responseCondition>`;
 }
