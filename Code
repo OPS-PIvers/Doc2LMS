@@ -26,66 +26,103 @@ function include(filename) {
 }
 
 /**
+ * Combines parsed questions and answers into a unified data structure.
+ * @param {Array<Object>} questions - Array of question objects from parsing (must include `number`).
+ * @param {Array<Object>} answers - Array of answer objects from parsing (must include `questionNumber`).
+ * @return {Array<Object>} Combined array where each object has question data and its corresponding answers.
+ */
+function combineQuestionsAndAnswers(questions, answers) {
+  if (!Array.isArray(questions)) throw new Error('combineQuestionsAndAnswers: questions must be an array');
+  if (!Array.isArray(answers)) throw new Error('combineQuestionsAndAnswers: answers must be an array');
+  // Build map from questionNumber to list of answer entries
+  const answerMap = new Map();
+  answers.forEach(ans => {
+    const num = ans.questionNumber || ans.number;
+    if (!answerMap.has(num)) answerMap.set(num, []);
+    answerMap.get(num).push(ans);
+  });
+
+  // Merge for each question
+  return questions.map(q => {
+    const qAnswers = answerMap.get(q.number) || [];
+    return Object.assign({}, q, { correctAnswers: qAnswers });
+  });
+}
+
+/**
  * startConversion – Main conversion function.
  * Options:
  *   exportFormat: one of "IMSCC" | "QTI" | "Blackboard" | "Moodle" (default IMSCC)
  *   applyQuickFixes: boolean (default false)
  */
 function startConversion(options) {
-  options = options || {};
-  var exportFormat = options.exportFormat || "IMSCC";
-  var doc = DocumentApp.getActiveDocument();
-  var docName = doc.getName();
-  
-  // Optionally apply quick fixes.
-  if (options.applyQuickFixes && applyQuickFixes()) {
-    Utilities.sleep(1000);
+  try {
+    options = options || {};
+    const exportFormat = (options.exportFormat || 'IMSCC').toUpperCase();
+    const doc = DocumentApp.getActiveDocument();
+    const docName = doc.getName();
+
+    if (options.applyQuickFixes && applyQuickFixes()) {
+      Utilities.sleep(1000);
+    }
+
+    const mainFolder = getOrCreateMainFolder();
+    const timestamp = formatTimestamp(new Date());
+    const projectFolder = mainFolder.createFolder(`${docName} - ${timestamp}`);
+
+    // Parse questions, images, and answers
+    const parseFn = {
+      IMSCC: IMSCCQuestionParsing_parseQuestions,
+      QTI: QTIQuestionParsing_parseQuestions,
+      MOODLE: MoodleQuestionParsing_parseQuestions,
+      BLACKBOARD: BlackboardQuestionParsing_parseQuestions
+    }[exportFormat];
+    const imageFn = {
+      IMSCC: IMSCCQuestionParsing_getImages,
+      QTI: QTIQuestionParsing_getImages,
+      MOODLE: MoodleQuestionParsing_getImages,
+      BLACKBOARD: BlackboardQuestionParsing_getImages
+    }[exportFormat];
+    const answerFn = {
+      IMSCC: IMSCCAnswerParsing_parseAnswers,
+      QTI: QTIAnswerParsing_parseAnswers,
+      MOODLE: MoodleAnswerParsing_parseAnswers,
+      BLACKBOARD: BlackboardAnswerParsing_parseAnswers
+    }[exportFormat];
+
+    const questions = parseFn();
+    const images = imageFn();
+    // after you call answerFn()
+    const rawAnswers = answerFn();
+    const answers = Array.isArray(rawAnswers)
+      ? rawAnswers
+      : (Array.isArray(rawAnswers.answers) 
+          ? rawAnswers.answers 
+          : []);
+
+    // now you know `answers` is an array
+    const combinedData = combineQuestionsAndAnswers(questions, answers);
+
+    // Dispatch export via factory
+    const handler = ExportFactory.get(exportFormat);
+    const exportResult = handler.export(combinedData, images, projectFolder, docName);
+
+    return {
+      success: true,
+      exportFolderUrl: projectFolder.getUrl(),
+      fileUrl: exportResult.imsccFileUrl || exportResult.exportFileUrl || exportResult.fileUrl,
+      message: 'Conversion completed successfully!'
+    };
+  } catch (e) {
+    const ui = DocumentApp.getUi();
+    if (e.name === 'AppError') {
+      ui.alert('Quiz Converter Error', e.userMessage, ui.ButtonSet.OK);
+    } else {
+      ui.alert('Quiz Converter Error', 'Unexpected error: ' + e.message, ui.ButtonSet.OK);
+      console.error(e);
+    }
+    throw e;
   }
-  
-  var mainFolder = getOrCreateMainFolder();
-  var timestamp = formatTimestamp(new Date());
-  var projectFolder = mainFolder.createFolder(docName + " - " + timestamp);
-  
-  // Use export-specific parsing routines.
-  var questions, images, answers;
-  if (exportFormat === "QTI") {
-    questions = QTIQuestionParsing_parseQuestions();
-    images = QTIQuestionParsing_getImages();
-    answers = QTIAnswerParsing_parseAnswers();
-  } else if (exportFormat === "Blackboard") {
-    questions = BlackboardQuestionParsing_parseQuestions();
-    images = BlackboardQuestionParsing_getImages();
-    answers = BlackboardAnswerParsing_parseAnswers();
-  } else if (exportFormat === "Moodle") {
-    questions = MoodleQuestionParsing_parseQuestions();
-    images = MoodleQuestionParsing_getImages();
-    answers = MoodleAnswerParsing_parseAnswers();
-  } else { // default IMSCC
-    questions = IMSCCQuestionParsing_parseQuestions();
-    images = IMSCCQuestionParsing_getImages();
-    answers = IMSCCAnswerParsing_parseAnswers();
-  }
-  
-  var combinedData = combineQuestionsAndAnswers(questions, answers);
-  
-  // Call the export module for the selected format.
-  var exportResult;
-  if (exportFormat === "QTI") {
-    exportResult = QTIExport_createExportFiles(combinedData, images, projectFolder, docName);
-  } else if (exportFormat === "Blackboard") {
-    exportResult = BlackboardExport_createExportFiles(combinedData, images, projectFolder, docName);
-  } else if (exportFormat === "Moodle") {
-    exportResult = MoodleExport_createExportFiles(combinedData, images, projectFolder, docName);
-  } else {
-    exportResult = IMSCCExport_createExportFiles(combinedData, images, projectFolder, docName);
-  }
-  
-  return {
-    success: true,
-    exportFolderUrl: projectFolder.getUrl(),
-    fileUrl: exportResult.fileUrl || exportResult.imsccFileUrl || exportResult.exportFileUrl,
-    message: "Conversion completed successfully!"
-  };
 }
 
 function getOrCreateMainFolder() {
