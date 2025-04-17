@@ -1,3 +1,6 @@
+/** Correct XML mime‑type since MimeType.XML does not exist */
+const XML_MIME = 'application/xml';
+
 /**
  * Code.gs – Main entry point.
  */
@@ -6,8 +9,52 @@ function onOpen() {
     .createMenu('Quiz Tools')
     .addItem('Open Quiz Converter', 'showSidebar')
     .addItem('Apply Quick Fixes', 'showQuickFixesDialog')
+    .addItem('Audit Question Types', 'showAuditDialog')
     .addToUi();
 }
+
+/** UI helper – opens a sidebar that lists every parsed question
+ *  with a dropdown to adjust its detected type.
+ *  Called from custom menu item “Audit Question Types”.           */
+function showAuditDialog() {
+
+  const data   = auditQuestionTypes();        // [{number,type,text}, …]
+  const types  = [
+    'MULTIPLE_CHOICE','TRUE_FALSE','FILL_IN_BLANK',
+    'SHORT_ANSWER','ESSAY','MATCHING','ORDERING'
+  ];
+
+  /* Build HTML table dynamically */
+  let rows = data.map(q => {
+    const opts = types.map(t =>
+      `<option value="${t}" ${t===q.type?'selected':''}>${t}</option>`).join('');
+    return `<tr>
+              <td>${q.number}</td>
+              <td><select data-qnum="${q.number}">${opts}</select></td>
+              <td style="max-width:350px">${q.text}</td>
+            </tr>`;
+  }).join('');
+
+  const html = HtmlService.createHtmlOutput(
+    `
+      <style>
+        body {font-family:Roboto,Arial,sans-serif;font-size:13px}
+        table {border-collapse:collapse;width:100%}
+        td,th {padding:4px;border:1px solid #ccc}
+        th {background:#f1f1f1}
+      </style>
+      <h3>Review Question Types</h3>
+      <table>
+        <thead><tr><th>#</th><th>Type</th><th>Stem (preview)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <button onclick="google.script.host.close()">Close</button>
+    `
+  ).setTitle('Audit Question Types').setWidth(450);
+
+  DocumentApp.getUi().showSidebar(html);
+}
+
 
 function showSidebar() {
   try {
