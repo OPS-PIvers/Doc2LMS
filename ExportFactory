@@ -1,0 +1,37 @@
+/**
+ * ExportFactory.gs - Dispatches export modules by format key.
+ */
+const ExportFactory = (() => {
+  // Registry mapping format keys to handler modules
+  const registry = new Map();
+
+  /**
+   * Register a handler for a given format.
+   * @param {string} format - e.g. 'IMSCC', 'QTI', 'Moodle', 'Blackboard'
+   * @param {{ export: function(Array,Object,Folder,string):Object }} handler
+   */
+  function register(format, handler) {
+    registry.set(format.toUpperCase(), handler);
+  }
+
+  /**
+   * Retrieve the handler for the given format.
+   * @param {string} format
+   * @return {{ export: function }}
+   */
+  function get(format) {
+    const key = (format || '').toUpperCase();
+    if (!registry.has(key)) {
+      throw new Error(`ExportFactory: Unsupported export format '${format}'`);
+    }
+    return registry.get(key);
+  }
+
+  return { register, get };
+})();
+
+// Register built‑in handlers
+ExportFactory.register('IMSCC', { export: IMSCCExport_createExportFiles });
+ExportFactory.register('QTI', { export: QTIExport_createExportFiles });
+ExportFactory.register('MOODLE', { export: MoodleExport_createExportFiles });
+ExportFactory.register('BLACKBOARD', { export: BlackboardExport_createExportFiles });
