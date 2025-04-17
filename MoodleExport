@@ -1,253 +1,84 @@
 /**
- * MoodleExport.gs – Exports the quiz as a Moodle XML package.
- *
- * This module creates a folder structure for Moodle:
- *   - A main folder ("MoodleExport")
- *   - A “resources” folder (for images)
- *   - A Moodle XML file (moodle.xml) that contains the quiz questions
- *   - A manifest file (imsmanifest.xml)
- *
- * Finally the folder is zipped into a package.
+ *  MoodleExport.gs – Moodle XML exporter
+ *  ------------------------------------------------------------------
  */
-function MoodleExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
-  try {
-    // Create main MoodleExport folder first
-    const moodleFolder = projectFolder.createFolder('MoodleExport');
-    const { resources: resourcesFolder } = Utilities_shared.createSubfolders(moodleFolder, ['resources']);
 
-    // Save images
-    images.forEach(img => {
-      if (img.blob) resourcesFolder.createFile(img.blob).setName(img.filename);
-    });
+'use strict';
 
-    // Build XML blobs
-    const moodleXml = createMoodleXML(quizTitle, questionsData);
-    const manifestXml = createMoodleManifest(quizTitle);
-    const xmlBlob = Utilities.newBlob(moodleXml, 'application/xml', 'moodle.xml');
-    const manifestBlob = Utilities.newBlob(manifestXml, 'application/xml', 'imsmanifest.xml');
+function MoodleExport_createExportFiles(qs, images, projectFolder, quizTitle) {
+  const moodleFolder    = projectFolder.createFolder('MoodleExport');
+  const resourcesFolder = moodleFolder   .createFolder('resources');
 
-    // Collect blobs
-    const blobs = [xmlBlob, manifestBlob];
-    resourcesFolder.getFiles().forEach(f => blobs.push(f.getBlob().setName('resources/' + f.getName())));
+  const imageMap = Moodle_processImages(images, resourcesFolder);
+  const xml       = Moodle_createQuizXML(quizTitle, qs, imageMap);
+  const xmlFile   = moodleFolder.createFile('moodle.xml', xml, XML_MIME);
+  const manifest  = Moodle_createManifest(quizTitle, imageMap);
+  const maniFile  = moodleFolder.createFile('imsmanifest.xml', manifest, XML_MIME);
 
-    // Zip and save
-    const zipBlob = Utilities.zip(blobs, `${quizTitle}_Moodle.zip`);
-    const exportFile = moodleFolder.createFile(zipBlob);
+  const blobs = [
+    maniFile.getBlob().setName('imsmanifest.xml'),
+    xmlFile .getBlob().setName('moodle.xml')
+  ];
+  Moodle_pushBlobs(blobs, resourcesFolder, 'resources');
 
-    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
+  const zip = Utilities.zip(blobs, quizTitle + '_Moodle.zip');
+  const out = moodleFolder.createFile(zip);
+  PropertiesService.getScriptProperties()
+        .setProperties({ lastExportFileId: out.getId(),
+                         lastExportFileName: out.getName() });
 
-    return { success: true, fileUrl: exportFile.getUrl(), exportFolderUrl: moodleFolder.getUrl(), exportFileId: exportFile.getId() };
-  } catch (e) {
-    console.error('Moodle export error:', e);
-    throw new AppError(
-      `Moodle export failed (internal): ${e.message}`,
-      'Failed to export quiz. Please verify your questions and try again.'
-    );
-  }
+  return { success: true, fileUrl: out.getUrl(), exportFolderUrl: moodleFolder.getUrl() };
 }
 
-/**
- * createMoodleXML(quizTitle, questionsData)
- *
- * This function converts the quiz questions (and associated data)
- * into Moodle XML format. It handles multiple question types:
- *   - Multiple Choice / True-False
- *   - Fill in the Blank / Numeric
- *   - Short Answer
- *   - Essay
- *   - Matching
- *   - Ordering
- *
- * For each question type, a dedicated helper function is called.
- */
-function createMoodleXML(quizTitle, questionsData) {
-  var xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
-  xml += '<quiz>\n';
- 
-  questionsData.forEach(function(q, idx) {
-    var qnum = idx + 1;
-    // Dispatch based on question type.
-    switch (q.type) {
-      case QUESTION_TYPES.MULTIPLE_CHOICE:
-      case QUESTION_TYPES.TRUE_FALSE:
-        xml += createMoodleMultipleChoice(q, qnum);
-        break;
-      case QUESTION_TYPES.FILL_IN_BLANK:
-      case QUESTION_TYPES.NUMERIC:
-        xml += createMoodleShortAnswer(q, qnum);
-        break;
-      case QUESTION_TYPES.SHORT_ANSWER:
-        xml += createMoodleShortAnswer(q, qnum);
-        break;
-      case QUESTION_TYPES.ESSAY:
-        xml += createMoodleEssay(q, qnum);
-        break;
-      case QUESTION_TYPES.MATCHING:
-        xml += createMoodleMatching(q, qnum);
-        break;
-      case QUESTION_TYPES.ORDERING:
-        xml += createMoodleOrdering(q, qnum);
-        break;
-      default:
-        // Default to short answer.
-        xml += createMoodleShortAnswer(q, qnum);
-    }
+/*──────── helpers ────────*/
+
+function Moodle_processImages(images, resourcesFolder) {
+  const map = new Map();
+  if (!images) return map;
+  images.forEach(function (img) {
+    if (!img.blob) return;
+    resourcesFolder.createFile(img.blob).setName(img.filename);
+    map.set(img.filename, true);
   });
- 
-  xml += '</quiz>';
-  return xml;
+  return map;
 }
 
-
-/**
- * createMoodleManifest(quizTitle, resourceEntries)
- *
- * Although Moodle XML import does not strictly require a manifest,
- * this function builds one for consistency with other export modules.
- */
-function createMoodleManifest(quizTitle, resourceEntries) {
-  resourceEntries = resourceEntries || [];
-  var sanitized = quizTitle.replace(/[<>&'"]/g, "");
-  var manifest = '<?xml version="1.0" encoding="UTF-8"?>\n';
-  manifest += '<manifest>\n';
-  manifest += '  <metadata>\n';
-  manifest += '    <title>' + sanitized + '</title>\n';
-  manifest += '    <schemaversion>1.0</schemaversion>\n';
-  manifest += '  </metadata>\n';
-  manifest += '  <resources>\n';
-  manifest += resourceEntries.join("\n");
-  manifest += '\n  </resources>\n';
-  manifest += '</manifest>';
-  return manifest;
+function Moodle_pushBlobs(arr, folder, prefix) {
+  const it = folder.getFiles();
+  while (it.hasNext()) arr.push(it.next().getBlob().setName(prefix + '/' + it.next().getName()));
 }
 
+function Moodle_createManifest(title, imgMap) {
+  let files = '';
+  imgMap.forEach(function (_v, fn) { files += `    <file href="resources/${fn}"/>\n`; });
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="MOODLE-MANIFEST">
+  <metadata><title>${sanitizeHtml(title)}</title></metadata>
+  <resources>${files}  </resources>
+</manifest>`;
+}
 
-/* Moodle XML Question Builders */
+/*──── main Moodle XML ────*/
 
-
-/**
- * createMoodleMultipleChoice(question, qnum)
- *
- * Builds a Moodle XML <question type="multichoice"> element.
- */
-function createMoodleMultipleChoice(question, qnum) {
-  var xml = '  <question type="multichoice">\n';
-  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
-  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
-  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
-  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
-  xml += '    <penalty>0.3333333</penalty>\n';
-  xml += '    <hidden>0</hidden>\n';
-  xml += '    <shuffleanswers>1</shuffleanswers>\n';
-  xml += '    <answernumbering>abc</answernumbering>\n';
- 
-  if (question.options && question.options.length > 0) {
-    question.options.forEach(function(opt, idx) {
-      var fraction = (idx === question.correctAnswerIndex) ? 100 : 0;
-      xml += '    <answer fraction="' + fraction + '" format="html">\n';
-      xml += '      <text><![CDATA[' + opt + ']]></text>\n';
-      xml += '      <feedback format="html"><text><![CDATA[]]></text></feedback>\n';
-      xml += '    </answer>\n';
+function Moodle_createQuizXML(title, qs, imageMap) {
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<quiz>\n`;
+  qs.forEach(function (q, idx) {
+    const qNum = idx + 1;
+    let stem = q.questionText;
+    if (q.hasImages) stem = replaceImageTags(stem, imageMap, qNum);
+    xml += `  <question type="multichoice">
+    <name><text>Question ${qNum}</text></name>
+    <questiontext format="html"><text><![CDATA[${stem}]]></text></questiontext>
+    <shuffleanswers>0</shuffleanswers>
+    <answernumbering>abc</answernumbering>\n`;
+    q.options.forEach(function (opt, i) {
+      const fraction = (i === q.correctAnswerIndex) ? 100 : 0;
+      let txt = opt.hasImages ? opt.text : sanitizeHtml(opt.text);
+      if (opt.hasImages) txt = replaceImageTags(txt, imageMap, qNum);
+      xml += `    <answer fraction="${fraction}" format="html"><text><![CDATA[${txt}]]></text></answer>\n`;
     });
-  }
- 
-  xml += '  </question>\n';
-  return xml;
-}
-
-
-/**
- * createMoodleShortAnswer(question, qnum)
- *
- * Handles fill-in-the-blank, numeric, or short answer questions.
- */
-function createMoodleShortAnswer(question, qnum) {
-  var xml = '  <question type="shortanswer">\n';
-  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
-  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
-  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
-  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
-  xml += '    <penalty>0.3333333</penalty>\n';
-  xml += '    <hidden>0</hidden>\n';
- 
-  if (question.correctAnswers && question.correctAnswers.length > 0) {
-    // Moodle expects one answer for shortanswer; if there are multiple, you might use multiple answers.
-    xml += '    <answer fraction="100" format="html"><text><![CDATA[' + question.correctAnswers[0] + ']]></text>\n';
-    xml += '      <feedback format="html"><text><![CDATA[]]></text></feedback>\n';
-    xml += '    </answer>\n';
-  }
- 
-  xml += '  </question>\n';
-  return xml;
-}
-
-
-/**
- * createMoodleEssay(question, qnum)
- *
- * Builds a Moodle XML <question type="essay"> element.
- */
-function createMoodleEssay(question, qnum) {
-  var xml = '  <question type="essay">\n';
-  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
-  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
-  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
-  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
-  xml += '    <penalty>0.0000000</penalty>\n';
-  xml += '    <hidden>0</hidden>\n';
-  xml += '  </question>\n';
-  return xml;
-}
-
-
-/**
- * createMoodleMatching(question, qnum)
- *
- * Builds a Moodle XML <question type="matching"> element.
- * Assumes question.options is an array of objects { left: string, right: string }.
- */
-function createMoodleMatching(question, qnum) {
-  var xml = '  <question type="matching">\n';
-  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
-  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
-  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
-  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
-  xml += '    <penalty>0.3333333</penalty>\n';
-  xml += '    <hidden>0</hidden>\n';
-  // Moodle matching questions use subquestions for each pair.
-  if (question.options && question.options.length > 0) {
-    question.options.forEach(function(pair, idx) {
-      xml += '    <subquestion>\n';
-      xml += '      <subquestiontext format="html"><text><![CDATA[' + pair.left + ']]></text></subquestiontext>\n';
-      xml += '      <answer fraction="100" format="html"><text><![CDATA[' + pair.right + ']]></text></answer>\n';
-      xml += '    </subquestion>\n';
-    });
-  }
-  xml += '  </question>\n';
-  return xml;
-}
-
-
-/**
- * createMoodleOrdering(question, qnum)
- *
- * Builds a Moodle XML <question type="ordering"> element.
- * Assumes question.options is an array of strings representing the correct order.
- */
-function createMoodleOrdering(question, qnum) {
-  var xml = '  <question type="ordering">\n';
-  xml += '    <name><text>Question ' + qnum + '</text></name>\n';
-  xml += '    <questiontext format="html"><text><![CDATA[' + question.questionText + ']]></text></questiontext>\n';
-  xml += '    <generalfeedback format="html"><text><![CDATA[]]></text></generalfeedback>\n';
-  xml += '    <defaultgrade>1.0000000</defaultgrade>\n';
-  xml += '    <penalty>0.3333333</penalty>\n';
-  xml += '    <hidden>0</hidden>\n';
-  if (question.options && question.options.length > 0) {
-    question.options.forEach(function(item) {
-      xml += '    <item><![CDATA[' + item + ']]></item>\n';
-    });
-  }
-  xml += '  </question>\n';
+    xml += `  </question>\n`;
+  });
+  xml += `</quiz>`;
   return xml;
 }
