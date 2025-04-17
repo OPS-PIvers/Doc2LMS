@@ -4,47 +4,44 @@
  */
 function BlackboardExport_createExportFiles(questionsData, images, projectFolder, quizTitle) {
   try {
-    var bbFolder = projectFolder.createFolder("BlackboardExport");
-    var resourcesFolder = bbFolder.createFolder("resources");
-    // Process images and create an imageMap (filename => file ID)
-    var imageMap = new Map();
-    if (images && images.length > 0) {
-      var processed = {};
-      images.forEach(function(img) {
-        if (img.blob && !processed[img.filename]) {
-          var file = resourcesFolder.createFile(img.blob).setName(img.filename);
-          imageMap.set(img.filename, file.getId());
-          processed[img.filename] = true;
-        }
-      });
-    }
-    // Pass the imageMap into createBlackboardXML so that image references can be updated.
-    var bbXml = createBlackboardXML(quizTitle, questionsData, imageMap);
-    var manifestContent = createBlackboardManifest(quizTitle);
-    var xmlFile = bbFolder.createFile("blackboard.xml", bbXml, "application/xml");
-    var manifestFile = bbFolder.createFile("imsmanifest.xml", manifestContent, "application/xml");
-    var files = [
-      xmlFile.getBlob().setName("blackboard.xml"),
-      manifestFile.getBlob().setName("imsmanifest.xml")
-    ];
-    if (resourcesFolder.getFiles().hasNext()) {
-      var resFiles = resourcesFolder.getFiles();
-      while (resFiles.hasNext()) {
-        var file = resFiles.next();
-        files.push(file.getBlob().setName("resources/" + file.getName()));
+    const bbFolder = projectFolder.createFolder('BlackboardExport');
+    const { resources: resourcesFolder } = Utilities_shared.createSubfolders(bbFolder, ['resources']);
+
+    // Process images
+    const imageMap = new Map();
+    images.forEach(img => {
+      if (img.blob && !imageMap.has(img.filename)) {
+        const file = resourcesFolder.createFile(img.blob).setName(img.filename);
+        imageMap.set(img.filename, file.getId());
       }
-    }
-    var zipBlob = Utilities.zip(files, quizTitle + "_Blackboard.zip");
-    var exportFile = bbFolder.createFile(zipBlob);
-    PropertiesService.getScriptProperties().setProperty("lastExportFileId", exportFile.getId());
-    PropertiesService.getScriptProperties().setProperty("lastExportFileName", exportFile.getName());
+    });
+
+    // Build XML blobs
+    const bbXml = createBlackboardXML(quizTitle, questionsData, imageMap);
+    const manifestXml = createBlackboardManifest(quizTitle);
+    const xmlBlob = Utilities.newBlob(bbXml, 'application/xml', 'blackboard.xml');
+    const manifestBlob = Utilities.newBlob(manifestXml, 'application/xml', 'imsmanifest.xml');
+
+    // Collect blobs
+    const blobs = [xmlBlob, manifestBlob];
+    resourcesFolder.getFiles().forEach(f => blobs.push(f.getBlob().setName('resources/' + f.getName())));
+
+    // Zip and save
+    const zipBlob = Utilities.zip(blobs, `${quizTitle}_Blackboard.zip`);
+    const exportFile = bbFolder.createFile(zipBlob);
+
+    PropertiesService.getScriptProperties().setProperty('lastExportFileId', exportFile.getId());
+    PropertiesService.getScriptProperties().setProperty('lastExportFileName', exportFile.getName());
+
     return { success: true, fileUrl: exportFile.getUrl(), exportFolderUrl: bbFolder.getUrl(), exportFileId: exportFile.getId() };
   } catch (e) {
-    console.error("Blackboard export error: " + e);
-    throw new Error("Failed to create Blackboard export files: " + e.message);
+    console.error('Blackboard export error:', e);
+    throw new AppError(
+      `Blackboard export failed (internal): ${e.message}`,
+      'Failed to export quiz. Please verify your questions and try again.'
+    );
   }
 }
-
 
 function createBlackboardXML(quizTitle, questionsData, imageMap) {
   var assessmentId = "bb_" + Utilities.getUuid().replace(/-/g, "");
@@ -121,8 +118,9 @@ function createBlackboardManifest(quizTitle) {
 // Helper: createMultipleChoiceXML now accepts an imageMap.
 function createMultipleChoiceXML(question, questionNumber, imageMap) {
   var qText = question.questionText;
-  if (question.hasImages && imageMap) {
-    qText = replaceImageTags(qText, imageMap);
+  if (question.hasImages) {
+    // Pass in the questionNumber so the utility can build correct filenames
+    qText = Utilities_shared.replaceImageTags(qText, imageMap, questionNumber);
   }
   var optsXml = "";
   question.options.forEach(function(opt, i) {
@@ -136,27 +134,4 @@ function createMultipleChoiceXML(question, questionNumber, imageMap) {
   return '    <choiceInteraction responseIdentifier="RESPONSE_' + questionNumber + '" shuffle="No" maxChoices="1">\n' +
          optsXml +
          '    </choiceInteraction>\n';
-}
-
-
-function replaceImageTags(text, imageMap) {
-  if (!text) return "";
-  // For Blackboard export, use a relative path pointing to the resources folder.
-  text = text.replace(/<img[^>]*src="[^"]*\/([^/"]+)"[^>]*>/g, function(match, filename) {
-    if (imageMap && imageMap.get(filename)) {
-      return '<img src="resources/' + filename + '" alt=""/>';
-    }
-    return match;
-  });
-  return text;
-}
-
-
-function sanitizeHtml(text) {
-  if (!text) return "";
-  return text.replace(/&/g, "&amp;")
-             .replace(/</g, "&lt;")
-             .replace(/>/g, "&gt;")
-             .replace(/"/g, "&quot;")
-             .replace(/'/g, "&apos;");
 }
