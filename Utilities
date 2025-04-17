@@ -1,72 +1,41 @@
 /**
- * Utilities.gs - Shared helper functions for Quiz Converter
- *
- * Consolidates core helpers (HTML sanitization, image-tag replacement,
- * batch folder creation, and option parsing) for reuse across parsing and export modules.
+ *  🔧  Utilities.gs
+ *  ——————————————————————————————————————————————————————————
+ *  Canonical helper functions shared by every module.
+ *  This file replaces all duplicate sanitizeHtml / replaceImageTags
+ *  definitions that were scattered across exporter files.
+ *  Make sure no other file still contains its own copy.
  */
 
-const Utilities_shared = (() => {
-  /**
-   * Sanitize HTML text to escape XML/HTML entities.
-   * @param {string} text
-   * @return {string}
-   */
-  function sanitizeHtml(text) {
-    if (!text) return '';
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
-  }
+/** Constant path used by all image tags */
+const RES_PATH = '$IMS-CC-FILEBASE$../resources/';
 
-  /**
-   * Replace [IMG:id] placeholders with IMS-CC <img> tags.
-   * @param {string} text
-   * @param {Map<string,string>} imageMap - Map of filename→fileId
-   * @param {number|string} questionNumber
-   * @return {string}
-   */
-  function replaceImageTags(text, imageMap, questionNumber) {
-    if (!text) return '';
-    return text.replace(/\[IMG:([^\]]+)\]/g, (match, id) => {
-      const filename = `question_${questionNumber}_image_${id}.png`;
-      if (imageMap && imageMap.has(filename)) {
-        return `<img src="$IMS-CC-FILEBASE$../resources/${filename}" alt=""/>`;
-      }
-      console.warn(`replaceImageTags: filename not found in imageMap: ${filename}`);
-      return match;
-    });
-  }
+/** HTML entity‑safe text (single authoritative copy) */
+function sanitizeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g,  '&amp;')
+    .replace(/</g,  '&lt;')
+    .replace(/>/g,  '&gt;')
+    .replace(/"/g,  '&quot;')
+    .replace(/'/g,  '&apos;');
+}
 
-  /**
-   * Create multiple subfolders in a parent folder.
-   * @param {Folder} parentFolder
-   * @param {string[]} names
-   * @return {{ [name: string]: Folder }}
-   */
-  function createSubfolders(parentFolder, names) {
-    const folders = {};
-    names.forEach(name => {
-      folders[name] = parentFolder.createFolder(name);
-    });
-    return folders;
-  }
-
-  /**
-   * Parse and normalize multiple-choice options using shared logic.
-   * @param {Array} optionsArray
-   * @return {Array}
-   */
-  function parseOptions(optionsArray) {
-    return OptionHandling.parseOptions(optionsArray, 'native');
-  }
-
-  return {
-    sanitizeHtml,
-    replaceImageTags,
-    createSubfolders,
-    parseOptions
-  };
-})();
+/**
+ * Replace every `[IMG:id]` placeholder in `text` with a proper <img> tag.
+ * @param {string}   text          The text that may contain placeholders.
+ * @param {Map}      imageMap      Map filename → Drive fileId (built by exporter).
+ * @param {number}   qNum          Current question number (needed for filename).
+ * @return {string} processed HTML string
+ */
+function replaceImageTags(text, imageMap, qNum) {
+  if (!text) return '';
+  return text.replace(/\[IMG:([^\]]+)\]/g, function (_m, id) {
+    const filename = `question_${qNum}_image_${id}.png`;
+    if (imageMap && imageMap.has(filename)) {
+      return `<img src="${RES_PATH}${filename}" alt=""/>`;
+    }
+    // leave untouched if not found – easier for debugging
+    return _m;
+  });
+}
