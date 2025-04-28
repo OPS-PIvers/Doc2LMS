@@ -159,14 +159,18 @@ function QTI_processAndCopyImages(allImages, resourcesFolder) {
     while (seenFilenames.has(finalFilename)) {
         console.warn(`Duplicate filename detected: ${finalFilename}. Appending counter.`);
         const nameParts = finalFilename.split('.');
-        const ext = nameParts.pop();
+        const ext = nameParts.pop() || 'png'; // handle cases with no extension
         finalFilename = `${nameParts.join('.')}_${counter}.${ext}`;
         counter++;
     }
 
     try {
-      // Create the file in Drive with the final name
-      resourcesFolder.createFile(imgMeta.blob).setName(finalFilename);
+      // *** CORRECTION HERE: Set the blob's name before creating the file ***
+      imgMeta.blob.setName(finalFilename);
+
+      // Create the file in Drive
+      resourcesFolder.createFile(imgMeta.blob); // No need to setName on the file again
+
       imageFilenameMap.set(imgMeta.id, finalFilename); // Map the original ID to the final filename
       seenFilenames.add(finalFilename);
     } catch (e) {
@@ -219,6 +223,7 @@ ${itemRefsXML}
 /**
  * Creates the XML content for the imsmanifest.xml file.
  * Lists the assessment, item, and image resources.
+ * Uses simplified QTI resource types.
  *
  * @param {string} title - The title of the package/quiz.
  * @param {string} assessmentIdent - Identifier of the assessment resource.
@@ -236,7 +241,8 @@ function QTI_createManifestXML(title, assessmentIdent, itemIdentifiers, imageFil
   let itemDependenciesXML = '';
   itemIdentifiers.forEach(itemIdent => {
     const itemResourceIdent = `resource_${itemIdent}`;
-    itemResourcesXML += `    <resource identifier="${itemResourceIdent}" type="imsqti_item_xmlv1p2" href="items/${itemIdent}.xml">\n`;
+    // *** Use simplified type: imsqti_xmlv1p2 ***
+    itemResourcesXML += `    <resource identifier="${itemResourceIdent}" type="imsqti_xmlv1p2" href="items/${itemIdent}.xml">\n`;
     itemResourcesXML += `      <file href="items/${itemIdent}.xml"/>\n`;
     itemResourcesXML += `    </resource>\n`;
     // Assessment resource depends on item resources
@@ -257,7 +263,7 @@ function QTI_createManifestXML(title, assessmentIdent, itemIdentifiers, imageFil
 <manifest identifier="${manifestIdent}" xmlns="http://www.imsglobal.org/xsd/imscp_v1p1" xmlns:imsmd="http://www.imsglobal.org/xsd/imsmd_v1p2" xmlns:imsqti="http://www.imsglobal.org/xsd/ims_qtiasiv1p2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.imsglobal.org/xsd/imscp_v1p1 http://www.imsglobal.org/xsd/imscp_v1p1.xsd http://www.imsglobal.org/xsd/imsmd_v1p2 http://www.imsglobal.org/xsd/imsmd_v1p2p2.xsd http://www.imsglobal.org/xsd/ims_qtiasiv1p2 http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1.xsd">
   <metadata>
     <schema>IMS Content</schema>
-    <schemaversion>1.1.3</schemaversion>
+    <schemaversion>1.1.3</schemaversion> <!-- Keeping this version for now -->
     <imsmd:lom>
       <imsmd:general>
         <imsmd:title>
@@ -275,7 +281,8 @@ function QTI_createManifestXML(title, assessmentIdent, itemIdentifiers, imageFil
     </organization>
   </organizations>
   <resources>
-    <resource identifier="${assessmentResourceIdent}" type="imsqti_assessment_xmlv1p2" href="assessment.xml">
+    <!-- *** Use simplified type: imsqti_xmlv1p2 *** -->
+    <resource identifier="${assessmentResourceIdent}" type="imsqti_xmlv1p2" href="assessment.xml">
       <file href="assessment.xml"/>
 ${itemDependenciesXML}
     </resource>
@@ -352,6 +359,7 @@ function QTI_createMultipleChoiceSingleItem(q, itemIdent, imageFilenameMap) {
   const scoreIdent = `score_${itemIdent}`;
 
   // Prepare question stem (replace image placeholders)
+  // Pass the correct image array (q.images) associated with the question object
   let stemText = replaceImagePlaceholdersWithHtml(q.text || `Question ${questionNumber}`, q.images);
   const stemHtml = `<![CDATA[${stemText}]]>`; // Wrap in CDATA
 
@@ -364,11 +372,13 @@ function QTI_createMultipleChoiceSingleItem(q, itemIdent, imageFilenameMap) {
       q.options = [{letter: 'A', text: 'Option A'}, {letter: 'B', 'text': 'Option B'}];
       if (q.type === QUESTION_TYPES.TRUE_FALSE) q.options = [{letter: 'T', text: 'True'}, {letter: 'F', text: 'False'}];
       // Set a default correct answer if none provided? Risky.
-      if (q.correctAnswer === null) q.correctAnswer = q.options[0].letter;
+      if (q.correctAnswer === null && q.options.length > 0) q.correctAnswer = q.options[0].letter;
   }
+
 
   q.options.forEach((opt, index) => {
     const choiceIdent = `choice_${opt.letter || index + 1}`; // Use letter or index
+    // Pass the correct image array (opt.images) associated with this specific option
     let optionText = replaceImagePlaceholdersWithHtml(opt.text || `Option ${opt.letter}`, opt.images);
     const optionHtml = `<![CDATA[${optionText}]]>`;
 
@@ -392,6 +402,7 @@ function QTI_createMultipleChoiceSingleItem(q, itemIdent, imageFilenameMap) {
      correctChoiceIdentifier = `choice_${q.options[0].letter || 1}`;
   }
 
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <item ident="${itemIdent}" title="Question ${questionNumber}">
   <itemmetadata>
@@ -413,6 +424,7 @@ ${choicesXml}
     <outcomes>
       <decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100" defaultval="0"/>
     </outcomes>
+    ${correctChoiceIdentifier ? `
     <respcondition continue="No">
       <conditionvar>
         <varequal respident="${responseIdent}">${correctChoiceIdentifier}</varequal>
@@ -426,6 +438,13 @@ ${choicesXml}
         </conditionvar>
         <setvar varname="SCORE" action="Set">0</setvar>
     </respcondition>
+    ` : `
+    <!-- No correct answer identified, setting score to 0 -->
+    <respcondition continue="No">
+        <conditionvar><other/></conditionvar>
+        <setvar varname="SCORE" action="Set">0</setvar>
+    </respcondition>
+    `}
   </resprocessing>
 </item>`;
   return xml;
@@ -447,17 +466,18 @@ function QTI_createFillInBlankTextItem(q, itemIdent, imageFilenameMap) {
   const stemHtml = `<![CDATA[${stemText}]]>`;
 
   let correctAnswersXml = '';
-  let score = 100; // Default score
+  let hasCorrectAnswers = false;
   if (q.correctAnswer && Array.isArray(q.correctAnswer) && q.correctAnswer.length > 0) {
       q.correctAnswer.forEach(ans => {
-          // QTI 1.2 typically uses OR logic implicitly for multiple varequal within one respcondition
-          correctAnswersXml += `          <varequal respident="${responseIdent}" case="No">${sanitizeHtml(ans)}</varequal>\n`; // case="No" for case-insensitive comparison
+          if (ans && typeof ans === 'string' && ans.trim().length > 0) { // Ensure answer is valid
+            correctAnswersXml += `          <varequal respident="${responseIdent}" case="No">${sanitizeHtml(ans.trim())}</varequal>\n`; // case="No" for case-insensitive comparison
+            hasCorrectAnswers = true;
+          }
       });
-  } else {
-      console.warn(`No correct answer(s) provided for FIB/SA question ${questionNumber}. Item may not be auto-gradable.`);
-      // Generate a condition that never matches or always gives 0?
-       correctAnswersXml = `          <varequal respident="${responseIdent}">__NEVER_MATCH_THIS__</varequal>\n`; // Ensure it doesn't accidentally match
-       score = 0; // Score 0 if no answer provided
+  }
+
+  if (!hasCorrectAnswers) {
+      console.warn(`No valid correct answer(s) provided for FIB/SA question ${questionNumber}. Item may not be auto-gradable.`);
   }
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -479,12 +499,13 @@ function QTI_createFillInBlankTextItem(q, itemIdent, imageFilenameMap) {
     <outcomes>
       <decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100" defaultval="0"/>
     </outcomes>
+    ${hasCorrectAnswers ? `
     <respcondition continue="No">
       <conditionvar>
         <!-- OR logic is implicit for multiple conditions here -->
 ${correctAnswersXml}
       </conditionvar>
-      <setvar varname="SCORE" action="Set">${score}</setvar>
+      <setvar varname="SCORE" action="Set">100</setvar>
     </respcondition>
      <!-- Condition for incorrect -->
      <respcondition continue="No">
@@ -496,6 +517,13 @@ ${correctAnswersXml}
         </conditionvar>
         <setvar varname="SCORE" action="Set">0</setvar>
      </respcondition>
+     ` : `
+     <!-- No valid answers, grading requires manual intervention or default 0 -->
+     <respcondition continue="No">
+        <conditionvar><other/></conditionvar>
+        <setvar varname="SCORE" action="Set">0</setvar>
+     </respcondition>
+     `}
   </resprocessing>
 </item>`;
   return xml;
@@ -516,14 +544,13 @@ function QTI_createFillInBlankNumericItem(q, itemIdent, imageFilenameMap) {
   const stemHtml = `<![CDATA[${stemText}]]>`;
 
   let conditionXml = '';
-  let score = 100;
+  let hasCorrectAnswer = false;
   if (q.correctAnswer !== null && typeof q.correctAnswer === 'number' && !isNaN(q.correctAnswer)) {
      // Simple numeric equality
      conditionXml = `<varequal respident="${responseIdent}">${q.correctAnswer}</varequal>`;
+     hasCorrectAnswer = true;
   } else {
      console.warn(`Invalid or missing numeric answer for question ${questionNumber}. Expected a number.`);
-     conditionXml = `<varequal respident="${responseIdent}">__NEVER_MATCH_THIS_NUMBER__</varequal>`; // Non-numeric to ensure non-match
-     score = 0;
   }
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -545,11 +572,12 @@ function QTI_createFillInBlankNumericItem(q, itemIdent, imageFilenameMap) {
     <outcomes>
       <decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100" defaultval="0"/>
     </outcomes>
+    ${hasCorrectAnswer ? `
     <respcondition continue="No">
       <conditionvar>
         ${conditionXml}
       </conditionvar>
-      <setvar varname="SCORE" action="Set">${score}</setvar>
+      <setvar varname="SCORE" action="Set">100</setvar>
     </respcondition>
     <!-- Condition for incorrect -->
      <respcondition continue="No">
@@ -558,6 +586,13 @@ function QTI_createFillInBlankNumericItem(q, itemIdent, imageFilenameMap) {
         </conditionvar>
         <setvar varname="SCORE" action="Set">0</setvar>
      </respcondition>
+     ` : `
+     <!-- No valid answers, grading requires manual intervention or default 0 -->
+     <respcondition continue="No">
+        <conditionvar><other/></conditionvar>
+        <setvar varname="SCORE" action="Set">0</setvar>
+     </respcondition>
+     `}
   </resprocessing>
 </item>`;
   return xml;
@@ -641,7 +676,7 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
     // Assume options = premises, and correctAnswers define the response mapping.
     // We need to create render_choice options for *both* sides.
 
-    if (!q.options || q.options.length === 0 || !q.correctAnswer || q.correctAnswer.length === 0) {
+    if (!q.options || q.options.length === 0 || !q.correctAnswer || !Array.isArray(q.correctAnswer) || q.correctAnswer.length === 0) {
         console.warn(`Matching question ${questionNumber} lacks sufficient options or correct answer pairs. Cannot generate XML.`);
         return null;
     }
@@ -649,7 +684,11 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
     // Generate premise choices
     q.options.forEach((premiseOpt, index) => {
         const premiseIdent = `premise_${premiseOpt.letter || index + 1}`;
-        premiseIdents.set(premiseOpt.letter, premiseIdent); // Map letter to ident
+        // Use premiseOpt.letter as the key if available, otherwise maybe text? Requires consistency.
+        const premiseKey = premiseOpt.letter || premiseOpt.text;
+        if (!premiseKey) { console.warn(`Missing key (letter or text) for premise option in Q${questionNumber}`); return;}
+        premiseIdents.set(premiseKey, premiseIdent); // Map letter/text to ident
+
         let premiseOptionText = replaceImagePlaceholdersWithHtml(premiseOpt.text, premiseOpt.images);
         premisesXml += `        <response_label ident="${premiseIdent}" rshuffle="No">\n`;
         premisesXml += `          <material><mattext texttype="text/html"><![CDATA[${premiseOptionText}]]></mattext></material>\n`;
@@ -660,8 +699,11 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
     const uniqueResponses = [...new Set(q.correctAnswer.map(pair => pair.response))];
     uniqueResponses.sort(); // Sort them consistently
     uniqueResponses.forEach((responseVal, index) => {
-         const responseIdent = `response_${responseVal || index + 1}`; // Use value or index
+         // Response value itself is the key
+         if (!responseVal) { console.warn(`Missing response value in correct answer pair for Q${questionNumber}`); return; }
+         const responseIdent = `response_${responseVal.replace(/[^a-zA-Z0-9]/g, '_') || index + 1}`; // Use value or index, sanitize value
          responseIdents.set(responseVal, responseIdent); // Map value to ident
+
          // Response text typically needs to be provided separately in the doc, or just use the value?
          let responseOptionText = responseVal; // Assuming the value is the text for now
          responsesXml += `        <response_label ident="${responseIdent}" rshuffle="No">\n`;
@@ -671,19 +713,24 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
 
 
     // Generate response processing conditions based on correct pairs
-    let conditionsXml = '';
-    let scorePerMatch = (q.correctAnswer.length > 0) ? (100 / q.correctAnswer.length) : 0;
-    q.correctAnswer.forEach(pair => {
-        const premiseIdent = premiseIdents.get(pair.premise);
-        const responseIdent = responseIdents.get(pair.response);
-        if (premiseIdent && responseIdent) {
-            // QTI 1.2 matching uses <varequal> with sub-identifiers or complex mapping.
-            // Simplification: Use map_response which is more QTI 1.2 appropriate
-            conditionsXml += `      <map_response source="${premiseIdent}" target="${responseIdent}" points="${scorePerMatch}"/>\n`;
-        } else {
-             console.warn(`Could not find identifiers for matching pair Premise='${pair.premise}', Response='${pair.response}' in question ${questionNumber}`);
-        }
-    });
+    let correctPairsString = q.correctAnswer
+        .map(pair => {
+            const pIdent = premiseIdents.get(pair.premise); // Lookup using premise letter/text key
+            const rIdent = responseIdents.get(pair.response); // Lookup using response value key
+            if (pIdent && rIdent) {
+                return `${pIdent}.${rIdent}`; // QTI 1.2 often uses dot notation for pairs in varsubset
+            }
+            console.warn(`Could not map pair: Premise Key="${pair.premise}", Response Key="${pair.response}" in Q${questionNumber}`);
+            return null;
+        })
+        .filter(pairStr => pairStr !== null)
+        .join(' '); // Space separated pairs
+
+
+    if (!correctPairsString) {
+         console.warn(`Could not generate valid correct pairs string for matching question ${questionNumber}.`);
+         return null;
+    }
 
     // This structure assumes a specific matching interaction type. QTI 1.2 is flexible but complex.
     // Using response_lid with Multiple cardinality and complex resprocessing is common.
@@ -694,6 +741,9 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
   <itemmetadata><qtimetadata><qtimetadatafield><fieldlabel>qmd_itemtype</fieldlabel><fieldentry>Matching</fieldentry></qtimetadatafield></qtimetadata></itemmetadata>
   <presentation>
     <material><mattext texttype="text/html">${stemHtml}</mattext></material>
+    <!-- QTI 1.2 Matching often uses two response_lids, one for premise, one for response -->
+    <!-- Or a single response_lid with complex rendering hints. Let's simplify. -->
+    <!-- This simplified structure assumes a dropdown or similar UI mapping premises to responses -->
     <response_lid ident="${responseIdent}" rcardinality="Multiple" rtiming="No"> <!-- Multiple responses needed -->
       <render_choice shuffle="No">
         <!-- Need pairs of choices -->
@@ -704,18 +754,21 @@ function QTI_createMatchingItem(q, itemIdent, imageFilenameMap) {
   </presentation>
   <resprocessing>
     <outcomes><decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100" defaultval="0"/></outcomes>
-    <respcondition title="Correct Response" continue="Yes">
-      <conditionvar>
-        <varsubset respident="${responseIdent}"> <!-- Check submitted pairs against correct pairs -->
-          <!-- Need to list correct pairs here, e.g., premise_A response_1 -->
-          <!-- This requires knowing the identifiers of the correct pairs -->
-          ${q.correctAnswer.map(pair => `${premiseIdents.get(pair.premise)} ${responseIdents.get(pair.response)}`).join(' ')}
-        </varsubset>
-      </conditionvar>
-      <!-- Calculate score based on number of correct matches -->
-      <setvar varname="SCORE" action="Set">100</setvar> <!-- Simplified: Full score if all match -->
-      <!-- More complex scoring: <setvar varname="SCORE" action="Add">scorePerMatch</setvar> for each correct pair -->
+    <!-- Simplified scoring fallback using varsubset for exact match -->
+    <respcondition title="Calculate Score" continue="No">
+        <conditionvar>
+            <varsubset respident="${responseIdent}">${correctPairsString}</varsubset>
+        </conditionvar>
+        <!-- This condition checks if the submitted response set is exactly the correct set -->
+        <setvar varname="SCORE" action="Set">100</setvar>
     </respcondition>
+    <respcondition title="Incorrect Response" continue="No">
+        <conditionvar>
+            <not><varsubset respident="${responseIdent}">${correctPairsString}</varsubset></not>
+        </conditionvar>
+        <setvar varname="SCORE" action="Set">0</setvar>
+    </respcondition>
+
   </resprocessing>
 </item>`;
   return xml; // Note: QTI 1.2 Matching XML is highly variable and system-dependent. This is a basic attempt.
@@ -736,7 +789,7 @@ function QTI_createOrderingItem(q, itemIdent, imageFilenameMap) {
   let choicesXml = '';
   const choiceIdents = new Map(); // Map item text/letter -> ident
 
-  if (!q.options || q.options.length === 0 || !q.correctAnswer || q.correctAnswer.length === 0) {
+  if (!q.options || q.options.length === 0 || !q.correctAnswer || !Array.isArray(q.correctAnswer) || q.correctAnswer.length === 0) {
       console.warn(`Ordering question ${questionNumber} lacks sufficient options or correct answer sequence. Cannot generate XML.`);
       return null;
   }
@@ -744,7 +797,11 @@ function QTI_createOrderingItem(q, itemIdent, imageFilenameMap) {
   // Generate choices from the options provided
   q.options.forEach((opt, index) => {
       const choiceIdent = `choice_${opt.letter || index + 1}`;
-      choiceIdents.set(opt.letter || opt.text, choiceIdent); // Map option identifier (letter or text) to QTI ident
+      // Use option's letter OR its text as the key for mapping
+      const optionKey = opt.letter || opt.text;
+      if (!optionKey) { console.warn(`Missing key (letter or text) for ordering option in Q${questionNumber}`); return;}
+      choiceIdents.set(optionKey, choiceIdent); // Map option identifier (letter or text) to QTI ident
+
       let optionText = replaceImagePlaceholdersWithHtml(opt.text, opt.images);
       choicesXml += `        <response_label ident="${choiceIdent}" rshuffle="Yes">\n`; // Usually shuffle ordering items
       choicesXml += `          <material><mattext texttype="text/html"><![CDATA[${optionText}]]></mattext></material>\n`;
@@ -753,17 +810,17 @@ function QTI_createOrderingItem(q, itemIdent, imageFilenameMap) {
 
   // Determine the correct sequence of identifiers
   const correctSequenceIdents = q.correctAnswer
-      .map(itemIdentifier => choiceIdents.get(itemIdentifier)) // Map answer sequence to QTI idents
+      .map(itemIdentifier => choiceIdents.get(itemIdentifier)) // Map answer sequence items (should be letters or text from options) to QTI idents
       .filter(ident => ident); // Filter out any nulls if mapping failed
 
   if (correctSequenceIdents.length !== q.correctAnswer.length) {
-       console.warn(`Could not map all items in the correct answer sequence for ordering question ${questionNumber}.`);
+       console.warn(`Could not map all items in the correct answer sequence for ordering question ${questionNumber}. Check if answer key items match option letters/text exactly.`);
        // Decide how to handle partial mapping - fail or proceed? Let's fail for now.
        return null;
   }
-  const correctSequenceString = correctSequenceIdents.join(' '); // Space-separated string for varsubset
+  const correctSequenceString = correctSequenceIdents.join(' '); // Space-separated string for varequal
 
-   // QTI 1.2 Ordering uses response_lid (Multiple) and checks the sequence in resprocessing
+   // QTI 1.2 Ordering uses response_lid (Ordered) and checks the sequence in resprocessing
    const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <item ident="${itemIdent}" title="Question ${questionNumber}">
   <itemmetadata><qtimetadata><qtimetadatafield><fieldlabel>qmd_itemtype</fieldlabel><fieldentry>Ordering</fieldentry></qtimetadatafield></qtimetadata></itemmetadata>
