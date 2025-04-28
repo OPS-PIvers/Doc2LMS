@@ -1,205 +1,251 @@
-/** Correct XML mime‑type since MimeType.XML does not exist */
-const XML_MIME = 'application/xml';
+/**
+ * Code.gs – Main entry point and orchestrator for the QTI 1.2 conversion.
+ */
+
+// Dependencies:
+// - QuestionParsing.gs (parseQuestions)
+// - AnswerKeyParsing.gs (parseAnswerKey)
+// - QTIExport.gs (QTIExport_createQTIPackage - to be created)
+// - Utilities.gs (formatTimestamp)
+// - AppError.gs
+// - Sidebar.html
 
 /**
- * Code.gs – Main entry point.
+ * Adds the custom menu to the Google Doc UI when the document is opened.
  */
 function onOpen() {
   DocumentApp.getUi()
     .createMenu('Quiz Tools')
-    .addItem('Open Quiz Converter', 'showSidebar')
-    .addItem('Apply Quick Fixes', 'showQuickFixesDialog')
-    .addItem('Audit Question Types', 'showAuditDialog')
+    .addItem('Open QTI Converter', 'showSidebar')
+    // Removed 'Apply Quick Fixes' and 'Audit Question Types' for simplification
     .addToUi();
 }
 
-/** UI helper – opens a sidebar that lists every parsed question
- *  with a dropdown to adjust its detected type.
- *  Called from custom menu item “Audit Question Types”.           */
-function showAuditDialog() {
-
-  const data   = auditQuestionTypes();        // [{number,type,text}, …]
-  const types  = [
-    'MULTIPLE_CHOICE','TRUE_FALSE','FILL_IN_BLANK',
-    'SHORT_ANSWER','ESSAY','MATCHING','ORDERING'
-  ];
-
-  /* Build HTML table dynamically */
-  let rows = data.map(q => {
-    const opts = types.map(t =>
-      `<option value="${t}" ${t===q.type?'selected':''}>${t}</option>`).join('');
-    return `<tr>
-              <td>${q.number}</td>
-              <td><select data-qnum="${q.number}">${opts}</select></td>
-              <td style="max-width:350px">${q.text}</td>
-            </tr>`;
-  }).join('');
-
-  const html = HtmlService.createHtmlOutput(
-    `
-      <style>
-        body {font-family:Roboto,Arial,sans-serif;font-size:13px}
-        table {border-collapse:collapse;width:100%}
-        td,th {padding:4px;border:1px solid #ccc}
-        th {background:#f1f1f1}
-      </style>
-      <h3>Review Question Types</h3>
-      <table>
-        <thead><tr><th>#</th><th>Type</th><th>Stem (preview)</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <button onclick="google.script.host.close()">Close</button>
-    `
-  ).setTitle('Audit Question Types').setWidth(450);
-
-  DocumentApp.getUi().showSidebar(html);
-}
-
-
+/**
+ * Displays the main sidebar interface for the converter.
+ */
 function showSidebar() {
   try {
-    var template = HtmlService.createTemplateFromFile('Sidebar');
-    var evaluated = template.evaluate().setTitle('Quiz Converter').setWidth(300);
+    // Assumes Sidebar.html exists and is updated to remove format selection
+    const template = HtmlService.createTemplateFromFile('Sidebar');
+    const evaluated = template.evaluate().setTitle('QTI 1.2 Converter').setWidth(300);
     DocumentApp.getUi().showSidebar(evaluated);
-    return 'Sidebar created';
+    console.log('Sidebar shown.');
+    return 'Sidebar created'; // Return value primarily for testing/logging
   } catch (e) {
     console.error('Error showing sidebar: ' + e);
-    throw e;
+    // Show error to user?
+    DocumentApp.getUi().alert(`Error loading sidebar: ${e.message}`);
+    throw e; // Re-throw for execution log
   }
 }
 
+/**
+ * Helper function required by HtmlService templates to include other HTML files.
+ * @param {string} filename - The name of the HTML file to include (e.g., 'Stylesheet.html').
+ * @return {string} The content of the included HTML file.
+ */
 function include(filename) {
   return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
 /**
- * Combines parsed questions and answers into a unified data structure.
- * @param {Array<Object>} questions - Array of question objects from parsing (must include `number`).
- * @param {Array<Object>} answers - Array of answer objects from parsing (must include `questionNumber`).
- * @return {Array<Object>} Combined array where each object has question data and its corresponding answers.
+ * Combines parsed questions with their corresponding parsed answers from the Map.
+ *
+ * @param {Array<Object>} questions - Array of question objects from parseQuestions.
+ *                                    Each object must have a unique `number` property.
+ * @param {Map<number, Object>} answerMap - Map of answers from parseAnswerKey,
+ *                                          where keys are question numbers and values
+ *                                          are the structured answer data.
+ * @return {Array<Object>} A new array where each question object is augmented
+ *                         with a `correctAnswer` property containing the data
+ *                         from the answerMap, or null if no answer was found.
  */
-function combineQuestionsAndAnswers(questions, answers) {
-  if (!Array.isArray(questions)) throw new Error('combineQuestionsAndAnswers: questions must be an array');
-  if (!Array.isArray(answers)) throw new Error('combineQuestionsAndAnswers: answers must be an array');
-  // Build map from questionNumber to list of answer entries
-  const answerMap = new Map();
-  answers.forEach(ans => {
-    const num = ans.questionNumber || ans.number;
-    if (!answerMap.has(num)) answerMap.set(num, []);
-    answerMap.get(num).push(ans);
-  });
+function combineQuestionsAndAnswers(questions, answerMap) {
+  if (!Array.isArray(questions)) {
+      throw new Error('combineQuestionsAndAnswers: Input `questions` must be an array.');
+  }
+  if (!(answerMap instanceof Map)) {
+       throw new Error('combineQuestionsAndAnswers: Input `answerMap` must be a Map.');
+  }
 
-  // Merge for each question
+  console.log(`Combining ${questions.length} questions with ${answerMap.size} answers.`);
+
   return questions.map(q => {
-    const qAnswers = answerMap.get(q.number) || [];
-    return Object.assign({}, q, { correctAnswers: qAnswers });
-  });
-}
-
-/**
- * startConversion – Main conversion function.
- * Options:
- *   exportFormat: one of "IMSCC" | "QTI" | "Blackboard" | "Moodle" (default IMSCC)
- *   applyQuickFixes: boolean (default false)
- */
-function startConversion(options) {
-  try {
-    options = options || {};
-    const exportFormat = (options.exportFormat || 'IMSCC').toUpperCase();
-    const doc = DocumentApp.getActiveDocument();
-    const docName = doc.getName();
-
-    if (options.applyQuickFixes && applyQuickFixes()) {
-      Utilities.sleep(1000);
+    if (q === null || typeof q !== 'object' || typeof q.number === 'undefined') {
+        console.warn('Skipping invalid question object in combineQuestionsAndAnswers:', q);
+        return null; // Skip invalid question structures
     }
 
+    const answerData = answerMap.get(q.number); // Get answer using question number
+
+    if (typeof answerData === 'undefined') {
+        console.warn(`No answer found in map for question number: ${q.number}`);
+    }
+
+    // Create a new object combining question and its answer
+    // Using Object.assign to avoid modifying the original question object directly
+    return Object.assign({}, q, {
+      correctAnswer: typeof answerData !== 'undefined' ? answerData : null // Add answerData or null
+    });
+  }).filter(q => q !== null); // Filter out any skipped invalid questions
+}
+
+
+/**
+ * Orchestrates the conversion process from Google Doc to QTI 1.2 format.
+ * Called from the sidebar UI.
+ *
+ * @param {Object} options - (Optional) Placeholder for any future options. Currently unused.
+ * @return {Object} Result object for the sidebar: { success: boolean, message: string, exportFolderUrl?: string, fileUrl?: string }
+ */
+function startConversion(options = {}) {
+  try {
+    console.log('Starting QTI 1.2 conversion process...');
+    const doc = DocumentApp.getActiveDocument();
+    const docName = doc.getName() || 'Untitled Document';
+
+    // --- Folder Setup ---
     const mainFolder = getOrCreateMainFolder();
     const timestamp = formatTimestamp(new Date());
-    const projectFolder = mainFolder.createFolder(`${docName} - ${timestamp}`);
+    // Sanitize docName slightly for folder name if needed
+    const safeDocName = docName.replace(/[/\\?%*:|"<>]/g, '-'); // Basic sanitization
+    const projectFolder = mainFolder.createFolder(`${safeDocName} - QTI 1.2 - ${timestamp}`);
+    console.log(`Created project folder: ${projectFolder.getName()}`);
 
-    // Parse questions, images, and answers
-    const parseFn = {
-      IMSCC: IMSCCQuestionParsing_parseQuestions,
-      QTI: QTIQuestionParsing_parseQuestions,
-      MOODLE: MoodleQuestionParsing_parseQuestions,
-      BLACKBOARD: BlackboardQuestionParsing_parseQuestions
-    }[exportFormat];
-    const imageFn = {
-      IMSCC: IMSCCQuestionParsing_getImages,
-      QTI: QTIQuestionParsing_getImages,
-      MOODLE: MoodleQuestionParsing_getImages,
-      BLACKBOARD: BlackboardQuestionParsing_getImages
-    }[exportFormat];
-    const answerFn = {
-      IMSCC: IMSCCAnswerParsing_parseAnswers,
-      QTI: QTIAnswerParsing_parseAnswers,
-      MOODLE: MoodleAnswerParsing_parseAnswers,
-      BLACKBOARD: BlackboardAnswerParsing_parseAnswers
-    }[exportFormat];
+    // --- Parsing ---
+    // 1. Parse Questions and Images
+    const { questions: parsedQuestions, images: allImages } = parseQuestions();
+    if (!parsedQuestions || parsedQuestions.length === 0) {
+       throw new AppError("Parsing Error", "No questions could be parsed from the document.");
+    }
+    console.log(`Parsed ${parsedQuestions.length} questions and found ${allImages.length} image references.`);
 
-    const questions = parseFn();
-    const images = imageFn();
-    // after you call answerFn()
-    const rawAnswers = answerFn();
-    const answers = Array.isArray(rawAnswers)
-      ? rawAnswers
-      : (Array.isArray(rawAnswers.answers) 
-          ? rawAnswers.answers 
-          : []);
+    // 2. Parse Answer Key
+    const answerMap = parseAnswerKey(); // Returns a Map { number: answerData }
+    console.log(`Parsed answers for ${answerMap.size} questions.`);
 
-    // now you know `answers` is an array
-    const combinedData = combineQuestionsAndAnswers(questions, answers);
+    // 3. Combine Questions and Answers
+    const combinedData = combineQuestionsAndAnswers(parsedQuestions, answerMap);
+    if (combinedData.length !== parsedQuestions.length) {
+        console.warn(`Number of combined items (${combinedData.length}) differs from initially parsed questions (${parsedQuestions.length}). Check for parsing errors or data loss.`);
+    }
+    console.log(`Combined data prepared for ${combinedData.length} questions.`);
 
-    // Dispatch export via factory
-    const handler = ExportFactory.get(exportFormat);
-    const exportResult = handler.export(combinedData, images, projectFolder, docName);
+    // --- Export ---
+    // Call the specific QTI 1.2 export function (to be implemented in QTIExport.gs)
+    // It needs the combined data, all image metadata, the output folder, and the quiz title.
+    // Assuming the function is named QTIExport_createQTIPackage
+    const exportResult = QTIExport_createQTIPackage(combinedData, allImages, projectFolder, docName);
 
+    console.log('QTI 1.2 Export function completed.');
+
+    // Check export result structure (assuming it returns { success, fileUrl, ... })
+    if (!exportResult || !exportResult.success) {
+        throw new Error(`QTI package creation failed. Reason: ${exportResult?.message || 'Unknown error from exporter.'}`);
+    }
+
+    // --- Success Response ---
+    const successMessage = `Conversion to QTI 1.2 completed successfully for ${combinedData.length} questions.`;
+    console.log(successMessage);
     return {
       success: true,
       exportFolderUrl: projectFolder.getUrl(),
-      fileUrl: exportResult.imsccFileUrl || exportResult.exportFileUrl || exportResult.fileUrl,
-      message: 'Conversion completed successfully!'
+      fileUrl: exportResult.fileUrl, // URL of the generated ZIP file
+      message: successMessage
     };
+
   } catch (e) {
+    console.error('Conversion failed:', e);
     const ui = DocumentApp.getUi();
-    if (e.name === 'AppError') {
-      ui.alert('Quiz Converter Error', e.userMessage, ui.ButtonSet.OK);
+    let userMessage;
+    if (e instanceof AppError) { // Use custom error message if available
+      userMessage = e.userMessage;
     } else {
-      ui.alert('Quiz Converter Error', 'Unexpected error: ' + e.message, ui.ButtonSet.OK);
-      console.error(e);
+      userMessage = `An unexpected error occurred: ${e.message}`;
     }
-    throw e;
+     // Also log stack trace if available
+     if (e.stack) {
+         console.error(`Stack Trace: ${e.stack}`);
+     }
+
+    // Display error in UI
+    ui.alert('QTI Conversion Error', userMessage, ui.ButtonSet.OK);
+
+    // Return error structure to sidebar
+    return {
+      success: false,
+      message: `Error: ${userMessage}`
+    };
+    // Note: Re-throwing 'e' might be desirable for Apps Script's execution log,
+    // but returning the structure allows the sidebar JS to handle the failure gracefully.
+    // Consider if re-throwing is needed based on debugging/logging strategy.
+    // throw e;
   }
 }
 
+/**
+ * Retrieves or creates the main parent folder for all quiz exports.
+ * @return {GoogleAppsScript.Drive.Folder} The Drive Folder object.
+ */
 function getOrCreateMainFolder() {
-  var folderName = "Doc to LMS";
-  var folders = DriveApp.getFoldersByName(folderName);
-  if (folders.hasNext()) return folders.next();
-  return DriveApp.createFolder(folderName);
+  const folderName = "Doc to LMS Exports"; // Changed name slightly for clarity
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) {
+    const folder = folders.next();
+    console.log(`Using existing main export folder: "${folderName}"`);
+    return folder;
+  } else {
+    const folder = DriveApp.createFolder(folderName);
+    console.log(`Created new main export folder: "${folderName}"`);
+    return folder;
+  }
 }
 
-function formatTimestamp(date) {
-  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var day = date.getDate();
-  var month = months[date.getMonth()];
-  var year = date.getFullYear();
-  var hours = String(date.getHours()).padStart(2, '0');
-  var minutes = String(date.getMinutes()).padStart(2, '0');
-  return month + " " + day + " " + year + " " + hours + ":" + minutes;
-}
-
+/**
+ * Prepares the last exported QTI package for direct download via the sidebar.
+ * Retrieves the file ID and name stored in Script Properties by the export function.
+ *
+ * @return {Object} Object containing base64 data, mime type, and filename for download.
+ *                  Throws an error if preparation fails.
+ */
 function getDirectDownloadUrl() {
   try {
-    var fileId = PropertiesService.getScriptProperties().getProperty("lastExportFileId");
-    var fileName = PropertiesService.getScriptProperties().getProperty("lastExportFileName");
-    if (!fileId) throw new Error("No export file found.");
-    var file = DriveApp.getFileById(fileId);
-    var blob = file.getBlob();
-    var base64 = Utilities.base64Encode(blob.getBytes());
-    return { data: base64, mimeType: blob.getContentType(), filename: fileName || file.getName() };
+    console.log("Preparing file for download...");
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const fileId = scriptProperties.getProperty("lastExportFileId");
+    const fileName = scriptProperties.getProperty("lastExportFileName");
+
+    if (!fileId) {
+      throw new Error("No previous export file information found. Please run a conversion first.");
+    }
+    if (!fileName) {
+        console.warn("Last export filename not found in properties, will use Drive file name.");
+    }
+
+    console.log(`Retrieving file ID: ${fileId}`);
+    const file = DriveApp.getFileById(fileId);
+    const effectiveFileName = fileName || file.getName(); // Use stored name or fallback to current name
+    const blob = file.getBlob();
+    const mimeType = blob.getContentType();
+    const base64Data = Utilities.base64Encode(blob.getBytes());
+
+    console.log(`File ready for download: ${effectiveFileName}, MimeType: ${mimeType}`);
+    return {
+        data: base64Data,
+        mimeType: mimeType,
+        filename: effectiveFileName
+    };
   } catch (e) {
-    console.error(e);
-    throw new Error("Download preparation failed: " + e.message);
+    console.error('Download preparation failed:', e);
+    // Provide a more user-friendly error message
+    let message = `Download preparation failed: ${e.message}`;
+    if (e.message && e.message.includes("Access denied: DriveApp")) {
+        message = "Download failed: The script may no longer have permission to access the file in Google Drive. Please try converting again.";
+    } else if (e.message && e.message.includes("File not found")) {
+        message = "Download failed: The exported file seems to have been deleted or moved. Please try converting again.";
+    }
+    // Throwing an error here will be caught by the .withFailureHandler in Sidebar.html JS
+    throw new Error(message);
   }
 }

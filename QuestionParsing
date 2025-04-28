@@ -1,303 +1,336 @@
 /**
  * QuestionParsing.gs
- * Contains all functions related to parsing questions from the document.
- * (Other helper functions like finalizeQuestion, cleanupQuestions, and determineQuestionType
- *  are assumed to be defined as in your version 17 code or as needed.)
+ * Contains functions for parsing questions, options, and images from the Google Doc,
+ * inferring question types suitable for QTI 1.2 export.
  */
 
+// Dependency: Constants.gs (QUESTION_TYPES, questionTypes map)
+// Dependency: Utilities.gs (generateImageFilename, sanitizeHtml - though sanitization happens at export)
 
-// Assume a global Map named questionTypes is defined in Constants.gs
-
-
+/**
+ * Processes a Google Docs element (Paragraph or ListItem) to extract text
+ * and identify inline images, creating placeholders and metadata.
+ *
+ * @param {GoogleAppsScript.Document.Element} element - The Document element.
+ * @return {{text: string, images: Array<Object>, isListItem: boolean, listId: string|null}}
+ *         Object containing the extracted text with image placeholders ([IMG:id]),
+ *         an array of image metadata objects ({id, blob, width, height}),
+ *         a flag indicating if it's a list item, and its list ID.
+ */
 function processElement(element) {
-  var text = '';
-  var images = [];
-  try {
-    if (element.getType() === DocumentApp.ElementType.PARAGRAPH) {
-      var result = processParagraph(element.asParagraph());
-      text = result.text;
-      images = result.images;
-    } else if (element.getType() === DocumentApp.ElementType.LIST_ITEM) {
-      var result = processParagraph(element.asListItem());
-      text = result.text;
-      images = result.images;
-    }
-  } catch (e) {
-    console.error('Error in processElement:', e);
-  }
-  return { text: text, images: images };
-}
+  let fullText = '';
+  const images = [];
+  let isListItem = false;
+  let listId = null;
+  let elementType = element.getType();
 
-function processParagraph(paragraph) {
-  var fullText = '';
-  var images = [];
   try {
-    var numChildren = paragraph.getNumChildren();
-    for (var i = 0; i < numChildren; i++) {
-      var child = paragraph.getChild(i);
-      var type = child.getType();
+    let paragraph; // Can be Paragraph or ListItem treated as Paragraph
+    if (elementType === DocumentApp.ElementType.PARAGRAPH) {
+      paragraph = element.asParagraph();
+    } else if (elementType === DocumentApp.ElementType.LIST_ITEM) {
+      paragraph = element.asListItem();
+      isListItem = true;
+      listId = paragraph.getListId(); // Get list ID for potential Ordering/Matching detection
+    } else {
+      // Skip unsupported element types
+      return { text: '', images: [], isListItem: false, listId: null };
+    }
+
+    const numChildren = paragraph.getNumChildren();
+    for (let i = 0; i < numChildren; i++) {
+      const child = paragraph.getChild(i);
+      const type = child.getType();
+
       if (type === DocumentApp.ElementType.TEXT) {
-        fullText += child.getText();
+        fullText += child.asText().getText();
       } else if (type === DocumentApp.ElementType.INLINE_IMAGE) {
-        var imageId = Utilities.getUuid().replace(/-/g, '');
-        var image = child.asInlineImage();
-        images.push({
-          id: imageId,
-          image: image,
-          width: image.getWidth(),
-          height: image.getHeight(),
-          blob: image.getBlob()
-        });
-        fullText += "[IMG:" + imageId + "]";
+        const image = child.asInlineImage();
+        const imageId = Utilities.getUuid().replace(/-/g, ''); // Unique ID for this image instance
+        try {
+          const blob = image.getBlob(); // Get the image data
+          // Store essential metadata; filename generated later using context
+          images.push({
+            id: imageId,
+            blob: blob,
+            contentType: blob.getContentType(),
+            originalName: blob.getName() || `image_${imageId}`, // Use blob name or generate one
+            width: image.getWidth(),
+            height: image.getHeight()
+          });
+          // Insert placeholder into the text stream
+          fullText += `[IMG:${imageId}]`;
+        } catch (e) {
+            console.error(`Could not process InlineImage (ID: ${imageId}): ${e}. Skipping image.`);
+            // Optionally insert an error placeholder: fullText += `[ERR: Image processing failed ${imageId}]`;
+        }
       }
+      // Add other type handlers if needed (e.g., HorizontalRule, Footnote)
     }
   } catch (e) {
-    console.error('Error in processParagraph:', e);
+    console.error(`Error processing element: ${e}`);
+    // Return potentially partial data
+    return { text: fullText.trim(), images: images, isListItem: isListItem, listId: listId };
   }
-  return { text: fullText, images: images };
-}
 
-function handleImage(image, currentQuestionImages, questionNumber, imageId) {
-  try {
-    var filename = "question_" + questionNumber + "_image_" + imageId + ".png";
-    var imageBlob = image.blob || image.getBlob();  // Try both ways to get blob
-    imageBlob.setName(filename);
-    
-    var imageMetadata = {
-      blob: imageBlob,
-      filename: filename,
-      width: image.width || image.getWidth(),
-      height: image.height || image.getHeight(),
-      id: imageId,
-      alt: ''
-    };
-    
-    currentQuestionImages.push(imageMetadata);
-    
-    return {
-      imageMetadata: imageMetadata,
-      imageTag: '<p dir="ltr"><img src="$IMS-CC-FILEBASE$../resources/' + filename + 
-                '" width="' + imageMetadata.width + '" height="' + imageMetadata.height + 
-                '" alt=""/></p>'
-    };
-  } catch (e) {
-    console.error('Error in handleImage:', e);
-    throw e;
-  }
+  return { text: fullText.trim(), images: images, isListItem: isListItem, listId: listId };
 }
-
 
 /**
- * (Assumed helper) determineQuestionType returns a question type constant.
- * For example, if options exist, it might return QUESTION_TYPES.MULTIPLE_CHOICE.
+ * Infers the question type based on keywords, structure, or defaults.
+ * This is a crucial step for guiding parsing and export.
+ *
+ * @param {string} text - The initial text of the question.
+ * @param {Array<Object>} initialOptions - Any options already parsed for this question (if any).
+ * @param {boolean} isListItem - Whether the question line is part of a list.
+ * @param {string|null} listId - The list ID if it's a list item.
+ * @return {string} The inferred question type constant from QUESTION_TYPES.
  */
-function determineQuestionType(text, options, questionNumber) {
-  // (Your existing logic goes here.)
-  if (options && options.length > 0) {
-    return QUESTION_TYPES.MULTIPLE_CHOICE;
-  }
-  return QUESTION_TYPES.SHORT_ANSWER;
+function inferQuestionType(text, initialOptions = [], isListItem = false, listId = null) {
+    const upperText = text.toUpperCase();
+
+    // Specific keyword checks first
+    if (/\bTRUE\b.*\bFALSE\b/.test(upperText) || /TRUE\/FALSE/.test(upperText)) {
+        return QUESTION_TYPES.TRUE_FALSE;
+    }
+    if (/\bMATCHING\b/.test(upperText) || /^\s*MATCH\s/i.test(text)) {
+        return QUESTION_TYPES.MATCHING;
+    }
+     if (/\bORDERING\b/.test(upperText) || /\bORDER\b/.test(upperText) || /\bSEQUENCE\b/.test(upperText)) {
+         return QUESTION_TYPES.ORDERING;
+     }
+    if (text.includes('___')) { // Simple check for fill-in-the-blanks
+        // Could add logic here to check if blanks suggest numbers vs text
+        return QUESTION_TYPES.FILL_IN_BLANK_TEXT;
+    }
+
+    // Structural checks
+    if (initialOptions && initialOptions.length > 0) {
+        // Check if options look like True/False
+        const optionLetters = initialOptions.map(opt => opt.letter);
+        if (optionLetters.includes('T') && optionLetters.includes('F')) {
+             return QUESTION_TYPES.TRUE_FALSE;
+        }
+        // Default MC if options exist and aren't T/F
+        return QUESTION_TYPES.MULTIPLE_CHOICE_SINGLE;
+    }
+
+    // Contextual checks (less reliable)
+    // if (isListItem && listId) {
+    // Could potentially infer Ordering/Matching if subsequent items follow a pattern,
+    // but this is complex and prone to errors. Better rely on keywords or explicit answers.
+    // }
+
+    // Default types
+    // If it's very short, maybe short answer? If longer, essay? This is subjective.
+    // Let's default to ESSAY as a safe bet for manually graded items if nothing else fits.
+    // Or SHORT_ANSWER if a more specific type isn't clear.
+    // Consider SHORT_ANSWER as a reasonable default that can sometimes be auto-graded.
+    return QUESTION_TYPES.SHORT_ANSWER;
 }
 
 
 /**
- * (Assumed helper) finalizeQuestion performs any final processing of a question.
- */
-function finalizeQuestion(question, currentOptions) {
-  if (!question) return;
-  
-  // Preserve the original question type
-  var originalType = question.type;
-  
-  // Process options
-  if (currentOptions && currentOptions.length > 0) {
-    question.options = currentOptions;
-  }
-  
-  question.type = originalType;  // Ensure type is preserved
-  return question;
-}
-
-
-/**
- * (Assumed helper) cleanupQuestions removes empty questions and sorts them.
- */
-function cleanupQuestions(questions) {
-  return questions.filter(function(q) { return q.text.trim() !== ''; });
-}
-
-
-/**
- * Main parseQuestions function.
- * Processes the document body and returns an object with arrays for questions and images.
-
+ * Parses the Google Document body to extract questions, answers, and images.
+ *
+ * @return {{questions: Array<Object>, images: Array<Object>}}
+ *         Object containing an array of parsed question objects and an array
+ *         of all unique image metadata objects found.
  */
 function parseQuestions() {
-  var doc = DocumentApp.getActiveDocument();
-  var body = doc.getBody();
-  var questions = [];
-  var allImages = [];
-  var currentQuestion = null;
-  var currentOptions = [];
-  var reachedAnswerKey = false;
-  var currentQuestionImages = [];
-  var questionNumber = 0;
- 
-  console.log('Starting question parsing...');
-  questionTypes.clear();
- 
-  var numChildren = body.getNumChildren();
-  for (var i = 0; i < numChildren && !reachedAnswerKey; i++) {
-    var child = body.getChild(i);
-    var processed = processElement(child);
-    var elementText = processed.text;
-    var elementImages = processed.images;
-   
-    console.log('Processing element:', i, 'Text:', elementText);
-    
-    // Check for answer key
-    if (/^answer\s*key:?$/i.test(elementText.trim())) {
-      console.log('Found answer key marker at element:', i);
+  const doc = DocumentApp.getActiveDocument();
+  const body = doc.getBody();
+  const questions = [];
+  const allImages = []; // Store all unique image metadata here
+  let currentQuestion = null;
+  let currentOptions = []; // Holds options for the current question being built
+  let accumulatedImages = []; // Images collected for the current question (stem + options)
+  let reachedAnswerKey = false;
+  let currentQuestionNumber = 0;
+
+  console.log('Starting QTI 1.2 question parsing...');
+  questionTypes.clear(); // Reset global question type map
+
+  const numChildren = body.getNumChildren();
+  for (let i = 0; i < numChildren; i++) {
+    const child = body.getChild(i);
+    const elementData = processElement(child);
+    let { text: elementText, images: elementImages, isListItem, listId } = elementData;
+
+    if (!elementText && elementImages.length === 0) {
+      // Skip empty elements entirely
+      continue;
+    }
+
+    // 1. Check for Answer Key Header (simple check)
+    if (/^\s*ANSWER\s+KEY\s*:?\s*$/i.test(elementText)) {
+      console.log(`Found answer key header at element index ${i}. Stopping question parsing.`);
       reachedAnswerKey = true;
+      break; // Stop processing further elements
+    }
+
+    // Add newly found images to accumulated list for the potential current question
+    // Generate filenames now using context (we'll refine context later if needed)
+    elementImages.forEach(imgMeta => {
+      const contextHint = currentQuestion ? `q${currentQuestion.number}` : 'doc';
+      imgMeta.filename = generateImageFilename(
+          currentQuestion ? currentQuestion.number : 0,
+          `elem${i}`, // Generic context for now
+          imgMeta.id,
+          imgMeta.contentType ? MimeType.getFileExtension(imgMeta.contentType) : 'png'
+      );
+      accumulatedImages.push(imgMeta);
+      allImages.push(imgMeta); // Add to global list as well
+       console.log(`Processed image: ${imgMeta.filename} (ID: ${imgMeta.id})`);
+    });
+
+    // 2. Detect Start of a New Question (e.g., "1.", "1)", "1 -")
+    // More robust regex: Optional space, digits, required space/dot/paren/dash, required space
+    const questionStartMatch = elementText.match(/^\s*(\d+)\s*[.)-]\s+(.*)/);
+
+    if (questionStartMatch) {
+      const detectedNumber = parseInt(questionStartMatch[1], 10);
+      const questionTextStart = questionStartMatch[2].trim(); // Text after the number
+
+      console.log(`Detected potential question start: Number ${detectedNumber}`);
+
+      // Finalize the previous question before starting a new one
       if (currentQuestion) {
-        finalizeQuestion(currentQuestion, currentOptions);
+        // Ensure accumulated images are linked to the question before finalizing
+        currentQuestion.images = accumulatedImages.filter(img =>
+             currentQuestion.text.includes(`[IMG:${img.id}]`) ||
+             currentQuestion.options.some(opt => opt.text.includes(`[IMG:${img.id}]`))
+        );
+        currentQuestion.hasImages = currentQuestion.images.length > 0;
+
+        // Add the completed question to the list
         questions.push(currentQuestion);
+        console.log(`Finalized question ${currentQuestion.number}: Type=${currentQuestion.type}, Options=${currentQuestion.options.length}, Images=${currentQuestion.images.length}`);
       }
+
+      // --- Start the new question ---
+      currentQuestionNumber = detectedNumber;
+      currentOptions = []; // Reset options for the new question
+      accumulatedImages = [...elementImages]; // Start accumulating images for this new question
+
+      // Infer the type for this new question
+      const inferredType = inferQuestionType(questionTextStart, [], isListItem, listId);
+
+      currentQuestion = {
+        number: currentQuestionNumber,
+        type: inferredType,
+        text: questionTextStart, // Start with text after number
+        options: currentOptions, // Reference to the live options array
+        images: [], // Will be populated during finalization
+        hasImages: elementImages.length > 0, // Initial image status
+        // Potentially add listId or other metadata if needed for parsing logic later
+      };
+
+      // Store the inferred type in the global map for answer key parsing
+      questionTypes.set(currentQuestionNumber, inferredType);
+      console.log(`Started new question ${currentQuestionNumber}: Inferred Type=${inferredType}`);
+
+    } else if (currentQuestion) {
+      // 3. Process as Continuation or Option of the Current Question
+      let isOption = false;
+
+      // More robust option detection (handles A., A), (A), a., a), (a) etc.) with text following
+      const optionMatch = elementText.match(/^\s*(?:(?:([A-Za-z])\s*[.)])|(?:\(\s*([A-Za-z])\s*\)))\s+(.*)/);
+
+      if (optionMatch) {
+        isOption = true;
+        const letter = (optionMatch[1] || optionMatch[2]).toUpperCase();
+        const optionText = optionMatch[3].trim(); // Text after the letter/marker
+
+        console.log(`Detected option ${letter} for question ${currentQuestionNumber}`);
+
+        const newOption = {
+          letter: letter,
+          text: optionText, // Contains [IMG:id] placeholders if images were present
+          images: elementImages // Metadata for images found *on this specific option line*
+          // hasImages is implicitly true if elementImages.length > 0
+        };
+        currentOptions.push(newOption);
+
+        // Refine question type if options suggest MC or T/F
+        if (currentQuestion.type !== QUESTION_TYPES.MULTIPLE_CHOICE_SINGLE &&
+            currentQuestion.type !== QUESTION_TYPES.MULTIPLE_CHOICE_MULTI &&
+            currentQuestion.type !== QUESTION_TYPES.TRUE_FALSE &&
+            currentQuestion.type !== QUESTION_TYPES.MATCHING && // Avoid overriding MATCHING
+            currentQuestion.type !== QUESTION_TYPES.ORDERING) { // Avoid overriding ORDERING
+           // Basic check for T/F options
+           const currentLetters = currentOptions.map(o => o.letter);
+           if (currentLetters.includes('T') && currentLetters.includes('F')) {
+                currentQuestion.type = QUESTION_TYPES.TRUE_FALSE;
+                questionTypes.set(currentQuestionNumber, QUESTION_TYPES.TRUE_FALSE);
+                console.log(`Re-inferred question ${currentQuestionNumber} as TRUE_FALSE based on options`);
+           } else {
+               // Default to MC Single if standard options appear
+                currentQuestion.type = QUESTION_TYPES.MULTIPLE_CHOICE_SINGLE;
+                questionTypes.set(currentQuestionNumber, QUESTION_TYPES.MULTIPLE_CHOICE_SINGLE);
+                console.log(`Re-inferred question ${currentQuestionNumber} as MULTIPLE_CHOICE_SINGLE based on options`);
+           }
+        }
+      }
+
+      // Handle Matching/Ordering items (example - needs refinement based on expected format)
+      // Example: Match Item "A. Term" paired with "1. Definition" elsewhere, or "1. Step one" for ordering
+      // This requires more complex state management or clearer document formatting conventions.
+      // Basic placeholder for potential future implementation:
+      /*
+      if (currentQuestion.type === QUESTION_TYPES.MATCHING) {
+         // Look for patterns like "A. Premise Text" or "1. Response Text"
+         // Store pairs appropriately in currentOptions
+      } else if (currentQuestion.type === QUESTION_TYPES.ORDERING) {
+         // Look for numbered or lettered list items that aren't standard MC options
+         // Store items in sequence in currentOptions
+      }
+      */
+
+      // If it wasn't an option start or other special item, append text to the current question stem
+      if (!isOption && elementText) { // Check elementText is not empty
+          // Add a space only if the current text doesn't already end with one
+          // and the new text doesn't start with punctuation that shouldn't have a preceding space.
+          const needsSpace = currentQuestion.text && !/\s$/.test(currentQuestion.text) && !/^[.,;:!?]/.test(elementText);
+          currentQuestion.text += (needsSpace ? ' ' : '') + elementText;
+          console.log(`Appended text to question ${currentQuestionNumber}`);
+      }
+
+    } else {
+      // Content before the first numbered question - handle as needed
+      // Could be instructions, a title, or an unnumbered first question.
+      // For now, we'll mostly ignore it unless specifically handled.
+      console.log(`Skipping content before first numbered question (Index ${i}): "${elementText.substring(0, 50)}..."`);
+    }
+
+    // Break loop if answer key was detected in this iteration
+    if (reachedAnswerKey) {
       break;
     }
-   
-    // Special handling for first question
-    if (questionNumber === 0 && elementText.trim() && !elementText.match(/^\d+\./)) {
-      questionNumber = 1;
-      currentQuestion = {
-        number: questionNumber,
-        text: elementText,
-        type: QUESTION_TYPES.MULTIPLE_CHOICE,
-        options: [],
-        images: [],
-        hasImages: false
-      };
-      questionTypes.set(questionNumber, QUESTION_TYPES.MULTIPLE_CHOICE);
-      console.log('Created first unnumbered question');
-    }
-    
-    // Handle images for current question
-    if (elementImages && elementImages.length > 0 && currentQuestion) {
-      try {
-        elementImages.forEach(function(imgData) {
-          if (!imgData || !imgData.image) {
-            console.warn('Invalid image data:', imgData);
-            return;
-          }
-          
-          var processedImage = handleImage(imgData.image, currentQuestionImages, currentQuestion.number, imgData.id);
-          allImages.push(processedImage.imageMetadata);
-          currentQuestion.images.push(processedImage.imageMetadata);
-          currentQuestion.hasImages = true;
-          currentQuestion.text = currentQuestion.text.replace("[IMG:" + imgData.id + "]", processedImage.imageTag);
-          
-          // For question 7, treat images as options
-          if (currentQuestion.number === 7) {
-            var optionLetter = String.fromCharCode(65 + currentQuestion.options.length);
-            currentQuestion.options.push({
-              letter: optionLetter,
-              text: processedImage.imageTag,
-              hasImages: true,
-              images: [processedImage.imageMetadata]
-            });
-            console.log('Added image option', optionLetter, 'to question 7');
-          }
-        });
-      } catch (e) {
-        console.error('Error processing images:', e);
-        throw e;
-      }
-    }
-    
-    // Detect new questions
-    var newQuestionMatch = elementText.match(/^(\d+)\./);
-    if (newQuestionMatch) {
-      if (currentQuestion) {
-        finalizeQuestion(currentQuestion, currentOptions);
-        questions.push(currentQuestion);
-        console.log('Added question:', currentQuestion.number, 'Type:', currentQuestion.type);
-      }
-      
-      var detectedNumber = parseInt(newQuestionMatch[1], 10);
-      currentOptions = [];
-      currentQuestionImages = [];
-      
-      // Determine question type based on content
-      var questionType;
-      if (elementText.includes('_')) {
-        questionType = QUESTION_TYPES.FILL_IN_BLANK;
-      } else if (detectedNumber === 7) {
-        questionType = QUESTION_TYPES.MULTIPLE_CHOICE;
-      } else if (detectedNumber >= 5 && detectedNumber <= 6) {
-        questionType = QUESTION_TYPES.ESSAY;
-      } else {
-        questionType = QUESTION_TYPES.MULTIPLE_CHOICE;
-      }
-      
-      var questionText = elementText.replace(/^\d+\.\s*/, '');
-      currentQuestion = {
-        number: detectedNumber,
-        text: questionText,
-        type: questionType,
-        options: [],
-        images: currentQuestionImages,
-        hasImages: false
-      };
-      
-      // Store type for answer matching
-      questionTypes.set(detectedNumber, questionType);
-      questionNumber = detectedNumber;
-      
-      console.log('Created new question:', detectedNumber, 'Type:', questionType);
-      
-    } else if (currentQuestion && elementText.trim()) {
-      // Handle options in (A) format
-      var optionMatch = elementText.match(/^\s*(?:\(([A-D])\)|([A-D])\.)\s*(.*)/i);
-      if (optionMatch) {
-        var optionLetter = (optionMatch[1] || optionMatch[2]).toUpperCase();
-        var optionText = optionMatch[3].trim();
-        currentQuestion.options.push({
-          letter: optionLetter,
-          text: optionText,
-          hasImages: false
-        });
-        console.log('Added option', optionLetter, 'to question', currentQuestion.number);
-      } else if (elementText.startsWith('They ')) {
-        // Handle options for first question
-        var letter = String.fromCharCode(65 + currentQuestion.options.length);
-        currentQuestion.options.push({
-          letter: letter,
-          text: elementText,
-          hasImages: false
-        });
-        console.log('Added "They" option', letter, 'to first question');
-      } else if (!elementText.startsWith('_')) {
-        currentQuestion.text = currentQuestion.text.trim() + ' ' + elementText.trim();
-      }
-    }
+  } // End loop through document elements
+
+  // Finalize the very last question after the loop finishes (if one exists)
+  if (currentQuestion) {
+     // Ensure accumulated images are linked before finalizing
+      currentQuestion.images = accumulatedImages.filter(img =>
+             currentQuestion.text.includes(`[IMG:${img.id}]`) ||
+             currentQuestion.options.some(opt => opt.text.includes(`[IMG:${img.id}]`))
+      );
+      currentQuestion.hasImages = currentQuestion.images.length > 0;
+
+      questions.push(currentQuestion);
+      console.log(`Finalized last question ${currentQuestion.number}: Type=${currentQuestion.type}, Options=${currentQuestion.options.length}, Images=${currentQuestion.images.length}`);
   }
-  
-  // Add the last question
-  if (currentQuestion && !reachedAnswerKey) {
-    finalizeQuestion(currentQuestion, currentOptions);
-    questions.push(currentQuestion);
-    console.log('Added final question:', currentQuestion.number);
-  }
-  
+
+  console.log(`Total questions parsed: ${questions.length}`);
+  console.log(`Total unique images found: ${allImages.length}`); // Note: allImages might contain duplicates if handled improperly, review logic if needed.
+
   if (questions.length === 0) {
-    throw new Error("No questions were found in the document.");
+      console.warn("No numbered questions were found in the document.");
+      // Consider throwing an error or returning an empty structure based on desired behavior
+      // throw new AppError("No questions found", "Could not find any numbered questions in the document. Please ensure questions start with a number followed by a period or parenthesis (e.g., '1. Question Text').");
   }
-  
-  // Log final results
-  console.log('Final questions:');
-  questions.forEach(q => {
-    console.log('Question', q.number, '-', 'Type:', q.type, 'Options:', q.options.length, 'Images:', q.images.length);
-  });
-  
+
+  // Return the parsed questions and the master list of image metadata
   return { questions: questions, images: allImages };
 }

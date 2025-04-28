@@ -1,7 +1,0 @@
-/**
- * BlackboardAnswerParsing.gs – Blackboard‑specific answer parsing.
- * This file provides the function for parsing Blackboard answer keys.
- */
-function BlackboardAnswerParsing_parseAnswers() {
-  return parseAnswerKey();
-}
